@@ -26,13 +26,15 @@ Grant the app roles:
 - `Contributor` on the subscription or target RG
 - `User Access Administrator` (or ability to assign `AcrPull`) if Terraform creates role assignments
 
-### GitHub secrets
+### GitHub secrets (Environment **`azure-prod`**)
 
 | Secret | Description |
 |--------|-------------|
 | `AZURE_CLIENT_ID` | App registration client ID |
 | `AZURE_TENANT_ID` | Directory (tenant) ID |
 | `AZURE_SUBSCRIPTION_ID` | Subscription ID |
+
+Put these on the **`azure-prod`** environment (Settings → Environments → azure-prod → Environment secrets), not only as repo variables.
 
 ### GitHub variables
 

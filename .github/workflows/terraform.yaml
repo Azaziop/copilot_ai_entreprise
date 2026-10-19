@@ -33,6 +33,7 @@ jobs:
   plan:
     name: Terraform plan
     runs-on: ubuntu-latest
+    environment: azure-prod
     defaults:
       run:
         working-directory: ${{ env.TF_WORKING_DIR }}
