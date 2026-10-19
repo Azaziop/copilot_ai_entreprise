@@ -1,4 +1,4 @@
-# Python-generated files
+# Python
 __pycache__/
 *.py[oc]
 build/
@@ -6,12 +6,16 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual environments
-.venv
+# Environnements et secrets
+.venv/
+venv/
 .env
 *.db
-*,lock
+*.sqlite3
+*.lock
 *.toml
 .python-version
-chroma_db
-chroma
+
+# Vector DB
+chroma/
+chroma_db/
