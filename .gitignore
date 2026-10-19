@@ -9,3 +9,9 @@ wheels/
 # Virtual environments
 .venv
 .env
+*.db
+*,lock
+*.toml
+.python-version
+chroma_db
+chroma
