@@ -1,5 +1,7 @@
 import os
 import shutil
+from datetime import datetime
+
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -11,6 +13,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from evaluation import evaluate_response
 from rag import retriever
+from src.ingestion.tabular import load_tabular_documents
 load_dotenv(override=True)
 app = FastAPI(title="Enterprise Copilot Modular API", version="5.0")
 from fastapi.middleware.cors import CORSMiddleware
@@ -96,33 +99,79 @@ def evaluate_endpoint(request: EvalRequest):
 def get_history(db: Session = Depends(get_db)):
     return db.query(ChatHistoryModel).all()
 
+@app.get("/documents")
+def list_documents(db: Session = Depends(get_db)):
+    docs = db.query(DocumentRecord).order_by(DocumentRecord.uploaded_at.desc()).all()
+    return [
+        {
+            "id": d.id,
+            "filename": d.filename,
+            "file_type": d.file_type,
+            "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+        }
+        for d in docs
+    ]
+
+
 @app.post("/upload")
 def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)):
     try:
-        data_dir = "data"
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="Nom de fichier manquant.")
+
+        data_dir = "data/raw"
         os.makedirs(data_dir, exist_ok=True)
         file_path = os.path.join(data_dir, file.filename)
-        
+
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-            
-        new_docs = []
-        if file.filename.endswith(".pdf"):
-            new_docs = PyPDFLoader(file_path).load()
-        elif file.filename.endswith((".txt", ".md")):
-            new_docs = TextLoader(file_path, encoding="utf-8").load()
-            
-        if new_docs:
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-            chunks = text_splitter.split_documents(new_docs)
-            vector_store.add_documents(chunks)
 
-        file_ext = file.filename.split(".")[-1]
-        db_doc = DocumentRecord(filename=file.filename, file_type=file_ext)
-        db.add(db_doc)
+        name = file.filename.lower()
+        new_docs = []
+        if name.endswith(".pdf"):
+            new_docs = PyPDFLoader(file_path).load()
+        elif name.endswith((".txt", ".md")):
+            new_docs = TextLoader(file_path, encoding="utf-8").load()
+        elif name.endswith((".csv", ".xlsx", ".xls")):
+            new_docs = load_tabular_documents(file_path)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Formats supportés: PDF, TXT, MD, CSV, XLSX.",
+            )
+
+        if not new_docs:
+            raise HTTPException(
+                status_code=400,
+                detail="Aucun contenu extractible depuis ce fichier.",
+            )
+
+        # CSV/XLSX are already row-chunked; still split long text rows safely
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=120)
+        chunks = text_splitter.split_documents(new_docs)
+        vector_store.add_documents(chunks)
+
+        file_ext = file.filename.rsplit(".", 1)[-1]
+        existing = (
+            db.query(DocumentRecord)
+            .filter(DocumentRecord.filename == file.filename)
+            .first()
+        )
+        if existing:
+            existing.file_type = file_ext
+            existing.uploaded_at = datetime.utcnow()
+            action = "ré-indexé"
+        else:
+            db.add(DocumentRecord(filename=file.filename, file_type=file_ext))
+            action = "indexé et enregistré"
+
         db.commit()
-        
-        return {"message": f"Fichier {file.filename} indexé et enregistré.", "filename": file.filename}
+        return {
+            "message": f"Fichier {file.filename} {action}.",
+            "filename": file.filename,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

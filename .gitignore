@@ -19,3 +19,22 @@ venv/
 # Vector DB
 chroma/
 chroma_db/
+
+# Logs & runtime
+logs/*.log
+!logs/.gitkeep
+
+# Parsed / local artifacts (keep folder structure)
+data/parsed/*
+!data/parsed/.gitkeep
+*.pyc
+seed.py
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfvars
+!terraform/terraform.tfvars.example
+terraform/backend.tf
+terraform/kubeconfig

@@ -1,0 +1,11 @@
+# Copy to backend.tf after creating the storage account, then re-init:
+#   terraform init -migrate-state
+#
+# terraform {
+#   backend "azurerm" {
+#     resource_group_name  = "rg-entcopilot-tfstate"
+#     storage_account_name = "entcopilottfstate"
+#     container_name       = "tfstate"
+#     key                  = "enterprise-copilot.tfstate"
+#   }
+# }

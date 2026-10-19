@@ -1,12 +1,14 @@
 import os
 import asyncio
 from typing import TypedDict, Literal
+
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, START, END
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from pydantic import BaseModel, Field
 from rag import get_rag_chain
 from dotenv import load_dotenv
 
@@ -15,12 +17,32 @@ load_dotenv(override=True)
 llm = ChatOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
-    openai_api_key=os.getenv("OPENROUTER_API_KEY"),  
+    openai_api_key=os.getenv("OPENROUTER_API_KEY"),
     model="deepseek/deepseek-chat",
-    temperature=0
+    temperature=0,
 )
 
 rag_chain = get_rag_chain()
+
+
+class RouteQuery(BaseModel):
+    """Achemine la requête vers l'outil ou le flux adéquat."""
+
+    destination: Literal["RAG", "TOOL", "DIRECT"] = Field(
+        ...,
+        description=(
+            "RAG pour l'analyse de documents internes (politiques, CV, bilans, PDF, "
+            "CSV, Excel/XLSX, comptes IFRS, capitaux propres, chiffres financiers).\n"
+            "TOOL pour les calculs, métriques et statut système via MCP.\n"
+            "DIRECT pour les salutations ou discussions générales sans contexte externe."
+        ),
+    )
+
+
+structured_router = llm.with_structured_output(
+    RouteQuery,
+    method="function_calling",
+)
 
 async def call_mcp_tool(prompt_text: str) -> str:
     server_params = StdioServerParameters(command="python", args=["mcp_server.py"], env=None)
@@ -61,26 +83,24 @@ class AgentState(TypedDict):
     decision: str
 
 def router_node(state: AgentState):
-    question = state['question']
-    router_prompt = ChatPromptTemplate.from_template("""Analyse la question de l'utilisateur. 
-- Réponds "RAG" si elle demande des documents internes.
-- Réponds "TOOL" si elle demande d'interroger le système, de calculer des frais, de lister les documents ou d'obtenir des statistiques (via MCP).
-- Réponds "DIRECT" pour le reste.
-
-Question : {question}
-Choix (RAG / TOOL / DIRECT) :""")
-    
-    chain = router_prompt | llm | StrOutputParser()
-    decision = chain.invoke({"question": question}).strip().upper()
-    
-    if "RAG" in decision:
-        decision = "RAG"
-    elif "TOOL" in decision:
-        decision = "TOOL"
-    else:
-        decision = "DIRECT"
-        
-    return {"decision": decision}
+    """Route via Structured Outputs (Pydantic + function calling), pas de parsing texte."""
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                (
+                    "Tu es un routeur d'entreprise expert. "
+                    "Détermine la destination de la requête selon le schéma fourni. "
+                    "Toute question sur le contenu d'un document (PDF, CV, bilan, IFRS, "
+                    "capitaux propres, politiques RH) doit aller vers RAG."
+                ),
+            ),
+            ("human", "{question}"),
+        ]
+    )
+    chain = prompt | structured_router
+    result = chain.invoke({"question": state["question"]})
+    return {"decision": result.destination}
 
 def rag_node(state: AgentState):
     question = state["question"]

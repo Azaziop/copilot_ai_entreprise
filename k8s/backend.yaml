@@ -1,0 +1,49 @@
+# LEGACY — prefer: kubectl apply -k k8s/overlays/minikube
+# Canonical manifests: k8s/base + k8s/overlays/*
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-backend
+  labels:
+    app: rag-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rag-backend
+  template:
+    metadata:
+      labels:
+        app: rag-backend
+    spec:
+      containers:
+      - name: backend
+        image: copilot-backend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: rag-config
+        - secretRef:
+            name: rag-secrets
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "1Gi"
+          limits:
+            cpu: "2000m"
+            memory: "3Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-backend-service
+spec:
+  type: NodePort
+  selector:
+    app: rag-backend
+  ports:
+  - port: 8000
+    targetPort: 8000
+    nodePort: 30081

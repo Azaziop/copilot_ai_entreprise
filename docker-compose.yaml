@@ -1,0 +1,41 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./chroma_db:/app/chroma_db
+    depends_on:
+      - redis
+      - qdrant
+
+  worker:
+    build: .
+    command: python jobs/index_corpus.py
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./chroma_db:/app/chroma_db
+    depends_on:
+      - redis
+      - qdrant
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  qdrant_data:

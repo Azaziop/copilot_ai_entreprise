@@ -1,0 +1,9 @@
+# LEGACY — prefer overlays. See k8s/base/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-config
+data:
+  LANGCHAIN_TRACING_V2: "false"
+  LANGCHAIN_PROJECT: "enterprise-copilot"
+  DATABASE_URL: "sqlite:///./data/enterprise_copilot.db"

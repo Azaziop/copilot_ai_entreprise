@@ -1,0 +1,127 @@
+name: Terraform Azure
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yaml"
+  push:
+    branches: [main, master]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yaml"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Run terraform apply"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  TF_WORKING_DIR: terraform
+  ARM_USE_OIDC: true
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  plan:
+    name: Terraform plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        id: plan
+        env:
+          TF_VAR_gitops_target_revision: ${{ github.ref_name }}
+        run: |
+          REPO_URL="${{ vars.GITOPS_REPO_URL }}"
+          if [ -z "$REPO_URL" ]; then
+            REPO_URL="https://github.com/${{ github.repository }}.git"
+          fi
+          export TF_VAR_gitops_repo_url="$REPO_URL"
+          terraform plan -input=false -out=tfplan
+          terraform show -no-color tfplan > plan.txt
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('terraform/plan.txt', 'utf8');
+            const body = `#### Terraform plan\n\`\`\`\n${plan.substring(0, 60000)}\n\`\`\``;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+  apply:
+    name: Terraform apply
+    needs: plan
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.apply == true) ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && vars.TF_AUTO_APPLY == 'true')
+    runs-on: ubuntu-latest
+    environment: azure-prod
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform apply
+        env:
+          TF_VAR_gitops_target_revision: main
+        run: |
+          REPO_URL="${{ vars.GITOPS_REPO_URL }}"
+          if [ -z "$REPO_URL" ]; then
+            REPO_URL="https://github.com/${{ github.repository }}.git"
+          fi
+          export TF_VAR_gitops_repo_url="$REPO_URL"
+          terraform apply -auto-approve -input=false

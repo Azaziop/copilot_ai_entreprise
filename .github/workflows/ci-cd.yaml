@@ -1,0 +1,108 @@
+name: Build and push to ACR
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "terraform/**"
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag (default: short SHA)"
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  BACKEND_IMAGE: copilot-backend
+  FRONTEND_IMAGE: copilot-frontend
+
+jobs:
+  build-push:
+    name: Build / push / bump GitOps tags
+    runs-on: ubuntu-latest
+    environment: azure-prod
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+      acr_login_server: ${{ steps.acr.outputs.login_server }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve ACR login server
+        id: acr
+        run: |
+          if [ -n "${{ vars.ACR_LOGIN_SERVER }}" ]; then
+            echo "login_server=${{ vars.ACR_LOGIN_SERVER }}" >> "$GITHUB_OUTPUT"
+          else
+            SERVER=$(az acr list --query "[0].loginServer" -o tsv)
+            echo "login_server=$SERVER" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Image tag
+        id: meta
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${GITHUB_SHA::7}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Login to ACR
+        run: az acr login --name "$(echo '${{ steps.acr.outputs.login_server }}' | cut -d. -f1)"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.acr.outputs.login_server }}/${{ env.BACKEND_IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.acr.outputs.login_server }}/${{ env.BACKEND_IMAGE }}:latest
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.PUBLIC_API_URL || 'http://PENDING_BACKEND_LB_IP' }}
+          tags: |
+            ${{ steps.acr.outputs.login_server }}/${{ env.FRONTEND_IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.acr.outputs.login_server }}/${{ env.FRONTEND_IMAGE }}:latest
+
+      - name: Update Azure Kustomize image tags
+        run: |
+          python3 scripts/update_azure_kustomize.py \
+            --acr "${{ steps.acr.outputs.login_server }}" \
+            --tag "${{ steps.meta.outputs.tag }}"
+
+      - name: Commit GitOps tag bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s/overlays/azure/kustomization.yaml
+          if git diff --staged --quiet; then
+            echo "No kustomize changes"
+            exit 0
+          fi
+          git commit -m "chore(gitops): bump images to ${{ steps.meta.outputs.tag }}"
+          git push

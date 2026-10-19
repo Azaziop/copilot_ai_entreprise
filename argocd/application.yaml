@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: enterprise-copilot
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    # Replace OWNER/REPO or set via Terraform var gitops_repo_url
+    repoURL: https://github.com/OWNER/copilot_ai.git
+    targetRevision: main
+    path: k8s/overlays/azure
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: enterprise-copilot
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

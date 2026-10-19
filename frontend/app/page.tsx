@@ -1,11 +1,20 @@
 "use client";
 
-import { useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
   route?: string;
+}
+
+interface DocItem {
+  id: number;
+  filename: string;
+  file_type?: string;
+  uploaded_at?: string | null;
 }
 
 export default function Home() {
@@ -14,15 +23,41 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [uploadStatus, setUploadStatus] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [documents, setDocuments] = useState<DocItem[]>([]);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  const apiUrl = "http://127.0.0.1:8000";
+  const apiUrl = useMemo(
+    () =>
+      process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ||
+      "http://127.0.0.1:18000",
+    []
+  );
 
-  // Gérer l'envoi du message au backend FastAPI
-  const handleSendMessage = async (e: React.FormEvent) => {
+  const loadDocuments = async () => {
+    try {
+      const res = await fetch(`${apiUrl}/documents`);
+      if (!res.ok) return;
+      const data = (await res.json()) as DocItem[];
+      setDocuments(Array.isArray(data) ? data : []);
+    } catch {
+      /* backend optional at first paint */
+    }
+  };
+
+  useEffect(() => {
+    loadDocuments();
+  }, [apiUrl]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() || loading) return;
 
-    const userMessage: Message = { role: "user", content: input };
+    const userMessage: Message = { role: "user", content: input.trim() };
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setLoading(true);
@@ -34,165 +69,271 @@ export default function Home() {
         body: JSON.stringify({ question: userMessage.content }),
       });
 
-      const data = await res.json();
-      const botMessage: Message = {
-        role: "assistant",
-        content: data.answer,
-        route: data.route_pris,
-      };
-      setMessages((prev) => [...prev, botMessage]);
-    } catch (error) {
-      console.error(error);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || `Erreur serveur (${res.status})`);
+      }
+
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: "❌ Erreur de communication avec le serveur." },
+        {
+          role: "assistant",
+          content: data.answer || "_Aucune réponse générée._",
+          route: data.route_pris,
+        },
+      ]);
+    } catch (error) {
+      const detail =
+        error instanceof Error
+          ? error.message
+          : "Erreur de communication avec le serveur.";
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: `**Erreur** — ${detail}` },
       ]);
     } finally {
       setLoading(false);
     }
   };
 
-  // Gérer l'upload de documents
-  const handleUpload = async (e: React.FormEvent) => {
+  const handleUpload = async (e: FormEvent) => {
     e.preventDefault();
-    if (!file) return;
+    if (!file || uploading) return;
 
     const formData = new FormData();
     formData.append("file", file);
-    setUploadStatus("Upload et indexation en cours...");
+    setUploading(true);
+    setUploadStatus("Indexation en cours… les gros PDF peuvent prendre 1–2 min.");
 
     try {
       const res = await fetch(`${apiUrl}/upload`, {
         method: "POST",
         body: formData,
       });
-      const data = await res.json();
-      if (res.ok) {
-        setUploadStatus(`✅ Fichier ${data.filename} indexé avec succès !`);
-        setFile(null);
-      } else {
-        setUploadStatus(`❌ Erreur : ${data.detail || "Échec de l'upload"}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || "Échec de l'upload");
       }
+      setUploadStatus(`Document indexé : ${data.filename}`);
+      setFile(null);
+      await loadDocuments();
     } catch (error) {
-      console.error(error);
-      setUploadStatus("❌ Erreur réseau lors de l'upload.");
+      const detail =
+        error instanceof Error ? error.message : "Erreur réseau lors de l'upload.";
+      setUploadStatus(detail);
+    } finally {
+      setUploading(false);
     }
   };
 
-  return (
-    <main className="flex h-screen bg-gray-900 text-white">
-      {/* Sidebar - Upload de documents */}
-      <aside className="w-80 bg-gray-800 p-6 flex flex-col justify-between border-r border-gray-700">
-        <div>
-          <h1 className="text-xl font-bold mb-4 text-blue-400">Enterprise Copilot</h1>
-          <p className="text-sm text-gray-400 mb-6">
-            Gérez vos documents internes et interagissez avec vos agents IA connectés en RAG et MCP.
-          </p>
+  const suggestions = [
+    "Capitaux propres OCP en 2023 ?",
+    "Compétences du CV Zaoui Anass",
+    "Politique de congés AlphaCorp",
+  ];
 
-          <form onSubmit={handleUpload} className="space-y-4">
-            <div>
-              <label className="block text-xs uppercase text-gray-400 mb-2 font-semibold">
-                Ajouter un document (PDF / TXT)
-              </label>
+  return (
+    <main className="min-h-screen px-3 py-3 md:px-6 md:py-5">
+      <div className="mx-auto grid h-[calc(100vh-1.5rem)] max-w-7xl overflow-hidden rounded-[28px] border border-[var(--line)] bg-[color-mix(in_srgb,var(--bg-elevated)_88%,transparent)] shadow-[var(--shadow)] backdrop-blur-sm md:h-[calc(100vh-2.5rem)] md:grid-cols-[300px_1fr]">
+        <aside className="flex flex-col border-b border-[var(--line)] bg-white/70 p-5 md:border-b-0 md:border-r">
+          <div className="animate-rise">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--accent)]">
+              Knowledge workspace
+            </p>
+            <h1
+              className="mt-2 text-3xl leading-none text-[var(--ink)]"
+              style={{ fontFamily: "var(--font-display), Georgia, serif" }}
+            >
+              Enterprise Copilot
+            </h1>
+            <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
+              Interrogez vos PDF, politiques RH et rapports financiers via RAG +
+              agents MCP.
+            </p>
+          </div>
+
+          <form onSubmit={handleUpload} className="mt-8 space-y-3">
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--muted)]">
+              Ajouter un document
+            </label>
+            <label className="flex cursor-pointer flex-col gap-2 rounded-2xl border border-dashed border-[var(--line)] bg-[var(--bg)] px-4 py-4 transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]">
+              <span className="text-sm font-semibold text-[var(--ink)]">
+                {file ? file.name : "Choisir PDF / TXT / MD / CSV / XLSX"}
+              </span>
+              <span className="text-xs text-[var(--muted)]">
+                Glissez un fichier ou cliquez pour parcourir
+              </span>
               <input
                 type="file"
-                accept=".pdf,.txt,.md"
+                accept=".pdf,.txt,.md,.csv,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+                className="hidden"
                 onChange={(e) => setFile(e.target.files?.[0] || null)}
-                className="w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer"
               />
-            </div>
+            </label>
             <button
               type="submit"
-              disabled={!file}
-              className="w-full py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 rounded-md font-medium text-sm transition"
+              disabled={!file || uploading}
+              className="w-full rounded-xl bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:bg-[#9bb5ac]"
             >
-              Uploader & Indexer
+              {uploading ? "Indexation…" : "Uploader & indexer"}
             </button>
+            {uploadStatus && (
+              <p className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
+                {uploadStatus}
+              </p>
+            )}
           </form>
 
-          {uploadStatus && (
-            <p className="mt-4 text-xs bg-gray-900 p-3 rounded text-gray-300 border border-gray-700">
-              {uploadStatus}
+          <div className="mt-6 min-h-0 flex-1 overflow-y-auto">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--muted)]">
+              Corpus indexé
             </p>
-          )}
-        </div>
+            <ul className="space-y-2">
+              {documents.length === 0 && (
+                <li className="text-xs text-[var(--muted)]">Aucun document listé.</li>
+              )}
+              {documents.map((doc) => (
+                <li
+                  key={doc.id}
+                  className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-xs text-[var(--ink)]"
+                >
+                  <div className="font-semibold">{doc.filename}</div>
+                  <div className="mt-1 text-[var(--muted)]">
+                    {(doc.file_type || "file").toUpperCase()}
+                    {doc.uploaded_at
+                      ? ` · ${new Date(doc.uploaded_at).toLocaleString("fr-FR")}`
+                      : ""}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
 
-        <div className="text-xs text-gray-500 border-t border-gray-700 pt-4">
-          Architecture Modulaire | FastAPI + LangGraph + MCP
-        </div>
-      </aside>
+          <p className="mt-4 border-t border-[var(--line)] pt-3 text-[11px] text-[var(--muted)]">
+            FastAPI · LangGraph · RAG · MCP
+          </p>
+        </aside>
 
-      {/* Zone de Chat principale */}
-      <section className="flex-1 flex flex-col justify-between">
-        {/* En-tête du chat */}
-        <header className="p-4 bg-gray-800 border-b border-gray-700 flex justify-between items-center shadow-md">
-          <span className="font-medium text-sm text-gray-300">Session active - Assistant d'Entreprise</span>
-          <span className="text-xs bg-blue-900 text-blue-300 px-3 py-1 rounded-full border border-blue-700">
-            En ligne
-          </span>
-        </header>
-
-        {/* Liste des messages */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          {messages.length === 0 && (
-            <div className="h-full flex flex-col items-center justify-center text-gray-500">
-              <p className="text-lg">Comment puis-je vous aider aujourd'hui ?</p>
-              <p className="text-sm mt-1">Posez une question sur le système, demandez une analyse ou interrogez vos documents.</p>
+        <section className="flex min-h-0 flex-col bg-[color-mix(in_srgb,white_55%,transparent)]">
+          <header className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
+            <div>
+              <p
+                className="text-lg text-[var(--ink)]"
+                style={{ fontFamily: "var(--font-display), Georgia, serif" }}
+              >
+                Session documentaire
+              </p>
+              <p className="text-xs text-[var(--muted)]">
+                Réponses grounded avec citations issues de vos fichiers
+              </p>
             </div>
-          )}
+            <span className="inline-flex items-center gap-2 rounded-full border border-[var(--line)] bg-white px-3 py-1 text-xs font-semibold text-[var(--accent-strong)]">
+              <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
+              En ligne
+            </span>
+          </header>
 
-          {messages.map((msg, index) => (
-            <div
-              key={index}
-              className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}
-            >
+          <div className="flex-1 space-y-4 overflow-y-auto px-4 py-5 md:px-6">
+            {messages.length === 0 && (
+              <div className="animate-rise mx-auto flex h-full max-w-xl flex-col justify-center">
+                <h2
+                  className="text-3xl text-[var(--ink)]"
+                  style={{ fontFamily: "var(--font-display), Georgia, serif" }}
+                >
+                  Posez une question sur vos documents.
+                </h2>
+                <p className="mt-3 text-sm text-[var(--muted)]">
+                  Exemples : chiffres IFRS, compétences d’un CV, politiques
+                  internes.
+                </p>
+                <div className="mt-5 flex flex-wrap gap-2">
+                  {suggestions.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setInput(s)}
+                      className="rounded-full border border-[var(--line)] bg-white px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {messages.map((msg, index) => (
               <div
-                className={`max-w-xl p-4 rounded-xl text-sm leading-relaxed ${
-                  msg.role === "user"
-                    ? "bg-blue-600 text-white rounded-br-none"
-                    : "bg-gray-800 text-gray-200 border border-gray-700 rounded-bl-none shadow-sm"
+                key={`${msg.role}-${index}`}
+                className={`animate-rise flex ${
+                  msg.role === "user" ? "justify-end" : "justify-start"
                 }`}
               >
-                <p className="whitespace-pre-wrap">{msg.content}</p>
-                {msg.route && (
-                  <div className="mt-2 pt-2 border-t border-gray-700 flex justify-between items-center text-[10px] text-gray-400">
-                    <span>Route empruntée :</span>
-                    <span className="bg-gray-900 px-2 py-0.5 rounded text-blue-400 font-mono font-bold">
-                      {msg.route}
-                    </span>
-                  </div>
-                )}
+                <div
+                  className={`max-w-[min(42rem,92%)] rounded-2xl px-4 py-3 shadow-sm ${
+                    msg.role === "user"
+                      ? "rounded-br-md bg-[var(--user)] text-white"
+                      : "rounded-bl-md border border-[var(--line)] bg-white"
+                  }`}
+                >
+                  {msg.role === "user" ? (
+                    <p className="whitespace-pre-wrap text-sm leading-relaxed">
+                      {msg.content}
+                    </p>
+                  ) : (
+                    <div className="md-body">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {msg.content}
+                      </ReactMarkdown>
+                    </div>
+                  )}
+                  {msg.route && (
+                    <div className="mt-3 flex items-center justify-between border-t border-[var(--line)] pt-2 text-[10px] uppercase tracking-[0.12em] text-[var(--muted)]">
+                      <span>Route</span>
+                      <span className="rounded-md bg-[var(--accent-soft)] px-2 py-0.5 font-bold text-[var(--accent-strong)]">
+                        {msg.route}
+                      </span>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
 
-          {loading && (
-            <div className="flex items-start">
-              <div className="bg-gray-800 text-gray-400 p-4 rounded-xl text-sm border border-gray-700 animate-pulse">
-                L'agent réfléchit et exécute les outils nécessaires...
+            {loading && (
+              <div className="flex justify-start">
+                <div className="inline-flex items-center gap-2 rounded-2xl border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--muted)]">
+                  <span className="thinking-dot" />
+                  <span className="thinking-dot" />
+                  <span className="thinking-dot" />
+                  <span className="ml-1">Analyse du corpus…</span>
+                </div>
               </div>
-            </div>
-          )}
-        </div>
+            )}
+            <div ref={bottomRef} />
+          </div>
 
-        {/* Barre de saisie */}
-        <form onSubmit={handleSendMessage} className="p-4 bg-gray-800 border-t border-gray-700 flex gap-3">
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Posez votre question (ex: Quel est le statut du système ?)..."
-            className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-blue-500 text-white"
-          />
-          <button
-            type="submit"
-            disabled={loading || !input.trim()}
-            className="px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 rounded-lg font-medium text-sm transition shadow"
+          <form
+            onSubmit={handleSendMessage}
+            className="border-t border-[var(--line)] bg-white/80 p-4 backdrop-blur"
           >
-            Envoyer
-          </button>
-        </form>
-      </section>
+            <div className="flex gap-3">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Ex. Capitaux propres consolidés OCP 2023…"
+                className="flex-1 rounded-2xl border border-[var(--line)] bg-[var(--bg)] px-4 py-3 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] focus:bg-white"
+              />
+              <button
+                type="submit"
+                disabled={loading || !input.trim()}
+                className="rounded-2xl bg-[var(--accent)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:bg-[#9bb5ac]"
+              >
+                Envoyer
+              </button>
+            </div>
+          </form>
+        </section>
+      </div>
     </main>
   );
 }

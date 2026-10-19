@@ -1,0 +1,54 @@
+# Global RAG settings — models, chunking, DB, cache, eval
+
+models:
+  embedding: "all-MiniLM-L6-v2"
+  llm: "deepseek/deepseek-chat"
+  reranker: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  llm_base_url: "https://openrouter.ai/api/v1"
+
+chunking:
+  chunk_size: 500
+  chunk_overlap: 50
+  strategy: "recursive"  # recursive | parent_child | token
+
+vector_db:
+  provider: "chroma"  # chroma | qdrant | pinecone
+  persist_directory: "./chroma_db"
+  collection: "enterprise_copilot"
+
+lexical:
+  enabled: true
+  index_path: "./data/parsed/bm25_index"
+
+retrieval:
+  top_k: 10
+  hybrid: true
+  rrf_k: 60
+  metadata_filters: true
+
+rerank:
+  enabled: true
+  top_n: 5
+
+cache:
+  exact: true
+  semantic: true
+  redis_url: "redis://localhost:6379/0"
+  ttl_seconds: 3600
+
+eval:
+  golden_set_path: "./data/eval"
+  metrics:
+    - faithfulness
+    - answer_relevancy
+    - context_precision
+  nightly: true
+
+observability:
+  tracing: true
+  log_level: "INFO"
+  log_path: "./logs/app.log"
+
+security:
+  auth_enabled: false
+  acl_enabled: true
