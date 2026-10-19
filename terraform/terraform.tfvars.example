@@ -1,7 +1,7 @@
 project_name           = "entcopilot"
 location               = "francecentral"
-node_count             = 2
-vm_size                = "Standard_B2s"
+node_count             = 1
+vm_size                = "Standard_D2as_v7"
 argocd_enabled         = true
 gitops_repo_url        = "https://github.com/OWNER/copilot_ai.git"
 gitops_target_revision = "main"

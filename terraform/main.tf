@@ -95,41 +95,6 @@ resource "helm_release" "argocd" {
   ]
 }
 
-resource "kubernetes_manifest" "argocd_app" {
-  count = var.argocd_enabled && var.gitops_repo_url != "" ? 1 : 0
-
-  manifest = {
-    apiVersion = "argoproj.io/v1alpha1"
-    kind       = "Application"
-    metadata = {
-      name      = "enterprise-copilot"
-      namespace = "argocd"
-      finalizers = [
-        "resources-finalizer.argocd.argoproj.io",
-      ]
-    }
-    spec = {
-      project = "default"
-      source = {
-        repoURL        = var.gitops_repo_url
-        targetRevision = var.gitops_target_revision
-        path           = "k8s/overlays/azure"
-      }
-      destination = {
-        server    = "https://kubernetes.default.svc"
-        namespace = "enterprise-copilot"
-      }
-      syncPolicy = {
-        automated = {
-          prune    = true
-          selfHeal = true
-        }
-        syncOptions = [
-          "CreateNamespace=true",
-        ]
-      }
-    }
-  }
-
-  depends_on = [helm_release.argocd]
-}
+# Argo CD Application is applied AFTER the cluster exists (kubernetes_manifest
+# cannot plan against a cluster that does not exist yet).
+# See: kubectl apply -f ../argocd/application.yaml

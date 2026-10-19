@@ -8,8 +8,7 @@ metadata:
 spec:
   project: default
   source:
-    # Replace OWNER/REPO or set via Terraform var gitops_repo_url
-    repoURL: https://github.com/OWNER/copilot_ai.git
+    repoURL: https://github.com/Azaziop/copilot_ai_entreprise.git
     targetRevision: main
     path: k8s/overlays/azure
   destination:

@@ -13,13 +13,13 @@ variable "location" {
 variable "node_count" {
   description = "AKS default node pool size"
   type        = number
-  default     = 2
+  default     = 1
 }
 
 variable "vm_size" {
-  description = "AKS node VM size"
+  description = "AKS node VM size (must be allowed in the target region/subscription)"
   type        = string
-  default     = "Standard_B2s"
+  default     = "Standard_D2as_v7"
 }
 
 variable "kubernetes_version" {

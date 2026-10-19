@@ -95,10 +95,10 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
   -o jsonpath='{.data.password}' | base64 -d; echo
 ```
 
-Apply / update the Application (if not created by Terraform `gitops_repo_url`):
+Apply the Argo CD Application **after** `terraform apply` (it cannot be planned before AKS exists):
 
 ```bash
-# edit repoURL in argocd/application.yaml first
+az aks get-credentials -g rg-entcopilot -n aks-entcopilot --overwrite-existing
 kubectl apply -f argocd/application.yaml
 ```
 
