@@ -1,0 +1,19 @@
+# À propos de l'entreprise AlphaCorp
+
+AlphaCorp est une entreprise technologique innovante fondée en 2022 et basée à Casablanca, au Maroc. 
+Elle se spécialise dans le développement de solutions logicielles sur mesure, l'intelligence artificielle générative, et la transformation numérique pour les petites et moyennes entreprises (PME).
+
+## Nos Valeurs et Engagements
+1. **Innovation ouverte :** Utilisation des technologies de pointe (comme le Machine Learning, les LLM et le Cloud).
+2. **Sécurité et Confidentialité :** Respect strict des données clients et conformité avec les réglementations en vigueur (Loi 09-08 au Maroc et RGPD en Europe).
+3. **Accompagnement sur mesure :** Chaque client bénéficie d'un suivi personnalisé par un expert dédié.
+
+## Politique de Congés et RH (Interne)
+* **Congés payés :** Chaque employé a droit à 22 jours ouvrables de congés par an, acquis à raison de 1,83 jour par mois travaillé.
+* **Télétravail :** AlphaCorp applique une politique de travail hybride. Les collaborateurs peuvent travailler en télétravail jusqu'à 2 jours par semaine, sous réserve de validation par leur manager.
+* **Horaires de travail :** Les horaires standards sont de 9h00 à 18h00, du lundi au vendredi, avec une pause déjeuner d'une heure.
+
+## Support Technique et Contact
+* **Email de support :** support@alphacorp.ma
+* **Horaires du support :** Du lundi au vendredi, de 8h30 à 19h00.
+* **Délai de réponse garanti :** Moins de 4 heures pour les tickets de priorité haute.

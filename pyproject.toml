@@ -1,0 +1,21 @@
+[project]
+name = "ai-copilot-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.148.0",
+    "langchain-community>=0.4.2",
+    "langchain-core>=1.6.9",
+    "langchain-openai>=1.7.0",
+    "sentence-transformers>=6.1.0",
+    "tqdm>=4.70.1",
+]
+
+[project.scripts]
+ai-copilot-agent = "ai_copilot_agent:main"
+
+[build-system]
+requires = ["uv_build>=0.12.21,<0.13.0"]
+build-backend = "uv_build"
