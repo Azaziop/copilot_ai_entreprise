@@ -76,7 +76,21 @@ Connect kubectl:
 az aks get-credentials -g rg-entcopilot -n aks-entcopilot --overwrite-existing
 ```
 
-## 3. Secrets on AKS (never commit real keys)
+## 3. Bootstrap with Ansible (namespace, secrets, Argo Application)
+
+Preferred after `terraform apply` (replaces manual `kubectl` for secrets + Application). See [`ansible/README.md`](../ansible/README.md).
+
+```powershell
+az login
+cd ansible
+docker compose run --rm azure                                          # AKS/ACR + kubeconfig
+docker compose run --rm -e PLAYBOOK=playbooks/bootstrap.yml ansible  # secrets + Argo app
+docker compose run --rm -e PLAYBOOK=playbooks/status.yml ansible
+```
+
+See [`ansible/README.md`](../ansible/README.md). On Windows, Ansible runs via Docker (not natively).
+
+Manual equivalent (if you skip Ansible):
 
 ```bash
 kubectl create namespace enterprise-copilot --dry-run=client -o yaml | kubectl apply -f -
@@ -84,26 +98,20 @@ kubectl -n enterprise-copilot create secret generic rag-secrets \
   --from-literal=OPENROUTER_API_KEY='sk-...' \
   --from-literal=LANGCHAIN_API_KEY='...' \
   --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f argocd/application.yaml
 ```
 
 ## 4. Argo CD
 
-If Terraform `argocd_enabled=true`, Argo CD is installed in namespace `argocd` (server Service type LoadBalancer).
+If Terraform `argocd_enabled=true`, Argo CD is installed in namespace `argocd`. The bootstrap playbook sets the server Service to **ClusterIP** (public IP quota).
 
 ```bash
-# Argo CD UI (ClusterIP — frees a public IP for the app LBs)
+# Argo CD UI
 kubectl -n argocd port-forward svc/argo-cd-argocd-server 8080:443
 # get admin password (user: admin)
 kubectl -n argocd get secret argocd-initial-admin-secret \
   -o jsonpath='{.data.password}' | base64 -d; echo
 # open https://localhost:8080
-```
-
-Apply the Argo CD Application **after** `terraform apply` (it cannot be planned before AKS exists):
-
-```bash
-az aks get-credentials -g rg-entcopilot -n aks-entcopilot --overwrite-existing
-kubectl apply -f argocd/application.yaml
 ```
 
 ## 5. CI image pipeline

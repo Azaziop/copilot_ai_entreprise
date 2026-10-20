@@ -38,3 +38,9 @@ terraform/*.tfvars
 !terraform/terraform.tfvars.example
 terraform/backend.tf
 terraform/kubeconfig
+
+# Ansible
+ansible/.collections/
+ansible/vars/secrets.yml
+ansible/**/*.retry
+ansible/group_vars/all.local.yml
