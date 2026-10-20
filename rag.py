@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
@@ -10,7 +12,10 @@ from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain_core.documents import Document
 from src.ingestion.tabular import load_tabular_documents
 from dotenv import load_dotenv
+
 load_dotenv(override=True)
+
+
 def init_rag():
     docs = []
     data_dirs = ["data/raw", "data"]
@@ -28,7 +33,6 @@ def init_rag():
                 docs.extend(TextLoader(file_path, encoding="utf-8").load())
             elif lower.endswith((".csv", ".xlsx", ".xls")):
                 docs.extend(load_tabular_documents(file_path))
-                
 
     if not docs:
         docs = [Document(page_content="Bienvenue dans l'assistant Enterprise Copilot.")]
@@ -56,19 +60,81 @@ def init_rag():
     )
     return vector_store
 
+
 # Instance globale du Vector Store pour l'ajout dynamique
 vector_store = init_rag()
 retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+
+
+def _doc_location(meta: dict, line_count: int) -> str:
+    if meta.get("row_start") is not None and meta.get("row_end") is not None:
+        sheet = meta.get("sheet") or ""
+        base = f"lignes {meta['row_start']}–{meta['row_end']}"
+        return f"{base}" + (f", feuille {sheet}" if sheet else "")
+    if meta.get("page") is not None:
+        try:
+            page = int(meta["page"]) + 1
+        except (TypeError, ValueError):
+            page = meta["page"]
+        return f"page {page}, {line_count} ligne(s) dans le passage"
+    return f"{line_count} ligne(s) dans le passage"
+
+
+def retrieve_with_sources(question: str, k: int = 10):
+    """Return (documents, source dicts with filename + location/lines)."""
+    docs = retriever.invoke(question)
+    if k and len(docs) > k:
+        docs = docs[:k]
+    sources = []
+    seen = set()
+    for doc in docs:
+        meta = dict(doc.metadata or {})
+        raw_source = meta.get("source") or meta.get("filename") or "document"
+        filename = Path(str(raw_source)).name
+        line_count = max(1, doc.page_content.count("\n") + 1)
+        location = _doc_location(meta, line_count)
+        key = (filename, location, doc.page_content[:80])
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append(
+            {
+                "type": "rag",
+                "filename": filename,
+                "location": location,
+                "lines": line_count,
+                "page": meta.get("page"),
+                "row_start": meta.get("row_start"),
+                "row_end": meta.get("row_end"),
+                "sheet": meta.get("sheet") or None,
+                "label": f"{filename} — {location}",
+                "snippet": doc.page_content[:220].replace("\n", " "),
+            }
+        )
+    return docs, sources
+
+
+def format_docs_for_prompt(docs) -> str:
+    parts = []
+    for doc in docs:
+        meta = doc.metadata or {}
+        raw_source = meta.get("source") or meta.get("filename") or "document"
+        filename = Path(str(raw_source)).name
+        line_count = max(1, doc.page_content.count("\n") + 1)
+        loc = _doc_location(meta, line_count)
+        parts.append(f"[Source: {filename} | {loc}]\n{doc.page_content}")
+    return "\n\n---\n\n".join(parts)
+
 
 def get_rag_chain():
     llm = ChatOpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=os.getenv("OPENROUTER_API_KEY"),
-        openai_api_key=os.getenv("OPENROUTER_API_KEY"),  # <-- Ajout crucial pour éviter l'erreur
+        openai_api_key=os.getenv("OPENROUTER_API_KEY"),
         model="deepseek/deepseek-chat",
-        temperature=0
+        temperature=0,
     )
-    
+
     template = """Tu es un analyste documentaire senior. Réponds UNIQUEMENT à partir du contexte.
 Si le contexte contient des chiffres (capitaux propres, bilan, IFRS, années), cite-les explicitement avec l'unité et l'année.
 Si l'information n'est pas dans le contexte, dis-le clairement sans inventer.
@@ -80,11 +146,11 @@ Contexte:
 Question: {input}"""
     prompt = ChatPromptTemplate.from_template(template)
 
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
-
     rag_chain = (
-        {"context": retriever | format_docs, "input": RunnablePassthrough()}
+        {
+            "context": retriever | format_docs_for_prompt,
+            "input": RunnablePassthrough(),
+        }
         | prompt
         | llm
         | StrOutputParser()

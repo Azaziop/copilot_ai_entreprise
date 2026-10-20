@@ -1,29 +1,31 @@
+import json
 import os
 import shutil
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 from database import init_db, SessionLocal, ChatHistoryModel, DocumentRecord
-from agents import app_graph
 from rag import vector_store
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from evaluation import evaluate_response
 from rag import retriever
 from src.ingestion.tabular import load_tabular_documents
-load_dotenv(override=True)
-app = FastAPI(title="Enterprise Copilot Modular API", version="5.0")
-from fastapi.middleware.cors import CORSMiddleware
+from streaming_chat import stream_chat
 
-app = FastAPI()
+load_dotenv(override=True)
+
+app = FastAPI(title="Enterprise Copilot Modular API", version="5.1")
 
 # --- CONFIGURATION CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Autorise toutes les origines (ou mets ["http://localhost:3000"])
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,30 +53,77 @@ def home():
 
 @app.post("/chat", response_model=QueryResponse)
 def chat_endpoint(request: QueryRequest, db: Session = Depends(get_db)):
+    """Compat non-stream (collecte le stream interne)."""
     try:
-        initial_state = {"question": request.question, "generation": "", "decision": ""}
-        final_state = app_graph.invoke(initial_state)
-        
-        answer = final_state["generation"]
-        route_pris = final_state["decision"]
-        
+        answer = ""
+        route_pris = "DIRECT"
+        for event in stream_chat(request.question):
+            if event.get("type") == "token":
+                answer += event.get("text") or ""
+            elif event.get("type") == "done":
+                answer = event.get("answer") or answer
+                route_pris = event.get("route") or route_pris
+
         db_item = ChatHistoryModel(
             question=request.question,
             answer=answer,
-            route_pris=route_pris
+            route_pris=route_pris,
         )
         db.add(db_item)
         db.commit()
         db.refresh(db_item)
-        
+
         return {
             "answer": answer,
             "route_pris": route_pris,
-            "history_id": db_item.id
+            "history_id": db_item.id,
         }
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat/stream")
+def chat_stream_endpoint(request: QueryRequest, db: Session = Depends(get_db)):
+    """SSE stream: reasoning, route, sources, tokens, done."""
+
+    def event_gen():
+        answer = ""
+        route_pris = "DIRECT"
+        try:
+            for event in stream_chat(request.question):
+                etype = event.get("type")
+                if etype == "token":
+                    answer += event.get("text") or ""
+                elif etype == "done":
+                    answer = event.get("answer") or answer
+                    route_pris = event.get("route") or route_pris
+                    db_item = ChatHistoryModel(
+                        question=request.question,
+                        answer=answer,
+                        route_pris=route_pris,
+                    )
+                    db.add(db_item)
+                    db.commit()
+                    db.refresh(db_item)
+                    event = {**event, "history_id": db_item.id}
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            db.rollback()
+            err = {"type": "error", "text": str(exc)}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 class EvalRequest(BaseModel):
     question: str
     answer: str

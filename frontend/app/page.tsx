@@ -4,10 +4,22 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+interface SourceItem {
+  type?: string;
+  filename: string;
+  location?: string;
+  lines?: number | null;
+  label?: string;
+  snippet?: string;
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
   route?: string;
+  reasoning?: string[];
+  sources?: SourceItem[];
+  streaming?: boolean;
 }
 
 interface DocItem {
@@ -17,6 +29,15 @@ interface DocItem {
   uploaded_at?: string | null;
 }
 
+type StreamEvent = {
+  type: string;
+  text?: string;
+  route?: string;
+  sources?: SourceItem[];
+  answer?: string;
+  history_id?: number;
+};
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -25,6 +46,7 @@ export default function Home() {
   const [uploadStatus, setUploadStatus] = useState("");
   const [uploading, setUploading] = useState(false);
   const [documents, setDocuments] = useState<DocItem[]>([]);
+  const [reasoningOpen, setReasoningOpen] = useState(true);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const apiUrl = useMemo(
@@ -53,44 +75,128 @@ export default function Home() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  const patchAssistant = (patch: Partial<Message>) => {
+    setMessages((prev) => {
+      const next = [...prev];
+      const last = next[next.length - 1];
+      if (!last || last.role !== "assistant") return prev;
+      next[next.length - 1] = { ...last, ...patch };
+      return next;
+    });
+  };
+
+  const appendReasoning = (text: string) => {
+    setMessages((prev) => {
+      const next = [...prev];
+      const last = next[next.length - 1];
+      if (!last || last.role !== "assistant") return prev;
+      next[next.length - 1] = {
+        ...last,
+        reasoning: [...(last.reasoning || []), text],
+      };
+      return next;
+    });
+  };
+
+  const appendToken = (text: string) => {
+    setMessages((prev) => {
+      const next = [...prev];
+      const last = next[next.length - 1];
+      if (!last || last.role !== "assistant") return prev;
+      next[next.length - 1] = {
+        ...last,
+        content: (last.content || "") + text,
+      };
+      return next;
+    });
+  };
+
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
     if (!input.trim() || loading) return;
 
-    const userMessage: Message = { role: "user", content: input.trim() };
-    setMessages((prev) => [...prev, userMessage]);
+    const question = input.trim();
     setInput("");
     setLoading(true);
+    setReasoningOpen(true);
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", content: question },
+      {
+        role: "assistant",
+        content: "",
+        reasoning: [],
+        sources: [],
+        streaming: true,
+      },
+    ]);
 
     try {
-      const res = await fetch(`${apiUrl}/chat`, {
+      const res = await fetch(`${apiUrl}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: userMessage.content }),
+        body: JSON.stringify({ question }),
       });
-
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.detail || `Erreur serveur (${res.status})`);
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Erreur serveur (${res.status})`);
       }
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: data.answer || "_Aucune réponse générée._",
-          route: data.route_pris,
-        },
-      ]);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+
+        for (const part of parts) {
+          const line = part
+            .split("\n")
+            .map((l) => l.trim())
+            .find((l) => l.startsWith("data:"));
+          if (!line) continue;
+          const raw = line.replace(/^data:\s*/, "");
+          let event: StreamEvent;
+          try {
+            event = JSON.parse(raw) as StreamEvent;
+          } catch {
+            continue;
+          }
+
+          if (event.type === "reasoning" && event.text) {
+            appendReasoning(event.text);
+          } else if (event.type === "route" && event.route) {
+            patchAssistant({ route: event.route });
+          } else if (event.type === "sources" && event.sources) {
+            patchAssistant({ sources: event.sources });
+          } else if (event.type === "token" && event.text) {
+            appendToken(event.text);
+          } else if (event.type === "done") {
+            patchAssistant({
+              ...(event.answer != null ? { content: event.answer } : {}),
+              ...(event.route ? { route: event.route } : {}),
+              streaming: false,
+            });
+          } else if (event.type === "error") {
+            throw new Error(event.text || "Erreur de stream");
+          }
+        }
+      }
+
+      patchAssistant({ streaming: false });
     } catch (error) {
       const detail =
         error instanceof Error
           ? error.message
           : "Erreur de communication avec le serveur.";
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `**Erreur** — ${detail}` },
-      ]);
+      patchAssistant({
+        content: `**Erreur** — ${detail}`,
+        streaming: false,
+      });
     } finally {
       setLoading(false);
     }
@@ -132,36 +238,38 @@ export default function Home() {
     "Politique de congés AlphaCorp",
   ];
 
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+
   return (
-    <main className="min-h-screen px-3 py-3 md:px-6 md:py-5">
-      <div className="mx-auto grid h-[calc(100vh-1.5rem)] max-w-7xl overflow-hidden rounded-[28px] border border-[var(--line)] bg-[color-mix(in_srgb,var(--bg-elevated)_88%,transparent)] shadow-[var(--shadow)] backdrop-blur-sm md:h-[calc(100vh-2.5rem)] md:grid-cols-[300px_1fr]">
-        <aside className="flex flex-col border-b border-[var(--line)] bg-white/70 p-5 md:border-b-0 md:border-r">
-          <div className="animate-rise">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--accent)]">
-              Knowledge workspace
+    <main className="min-h-screen px-0 py-0 md:px-4 md:py-4">
+      <div className="mx-auto grid h-screen max-w-[1400px] overflow-hidden border-0 bg-[var(--panel)] shadow-[var(--shadow)] md:h-[calc(100vh-2rem)] md:grid-cols-[280px_1fr] md:rounded-xl md:border md:border-[var(--line)]">
+        <aside className="flex flex-col border-b border-[var(--line)] bg-[var(--bg-elevated)] md:border-b-0 md:border-r">
+          <div className="animate-rise border-b border-[var(--line)] px-5 py-5">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[var(--accent)]">
+              Enterprise AI
             </p>
             <h1
-              className="mt-2 text-3xl leading-none text-[var(--ink)]"
+              className="mt-1.5 text-[1.65rem] leading-tight text-[var(--ink)]"
               style={{ fontFamily: "var(--font-display), Georgia, serif" }}
             >
-              Enterprise Copilot
+              Copilot
             </h1>
-            <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
-              Interrogez vos PDF, politiques RH et rapports financiers via RAG +
-              agents MCP.
+            <p className="mt-2 text-[13px] leading-relaxed text-[var(--muted)]">
+              Assistant documentaire professionnel — réponses sourcées, raisonnement
+              visible en direct.
             </p>
           </div>
 
-          <form onSubmit={handleUpload} className="mt-8 space-y-3">
-            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--muted)]">
-              Ajouter un document
+          <form onSubmit={handleUpload} className="space-y-3 px-5 py-4">
+            <label className="block text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--muted)]">
+              Base documentaire
             </label>
-            <label className="flex cursor-pointer flex-col gap-2 rounded-2xl border border-dashed border-[var(--line)] bg-[var(--bg)] px-4 py-4 transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]">
-              <span className="text-sm font-semibold text-[var(--ink)]">
-                {file ? file.name : "Choisir PDF / TXT / MD / CSV / XLSX"}
+            <label className="flex cursor-pointer flex-col gap-1 rounded-lg border border-[var(--line)] bg-white px-3 py-3 transition hover:border-[var(--accent)]">
+              <span className="truncate text-sm font-medium text-[var(--ink)]">
+                {file ? file.name : "Importer PDF, TXT, MD, CSV, XLSX"}
               </span>
-              <span className="text-xs text-[var(--muted)]">
-                Glissez un fichier ou cliquez pour parcourir
+              <span className="text-[11px] text-[var(--muted)]">
+                Indexation locale Chroma · citations fichier / lignes
               </span>
               <input
                 type="file"
@@ -173,32 +281,32 @@ export default function Home() {
             <button
               type="submit"
               disabled={!file || uploading}
-              className="w-full rounded-xl bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:bg-[#9bb5ac]"
+              className="w-full rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-45"
             >
-              {uploading ? "Indexation…" : "Uploader & indexer"}
+              {uploading ? "Indexation…" : "Indexer"}
             </button>
             {uploadStatus && (
-              <p className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
+              <p className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
                 {uploadStatus}
               </p>
             )}
           </form>
 
-          <div className="mt-6 min-h-0 flex-1 overflow-y-auto">
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--muted)]">
-              Corpus indexé
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-4">
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--muted)]">
+              Corpus ({documents.length})
             </p>
-            <ul className="space-y-2">
+            <ul className="space-y-1.5">
               {documents.length === 0 && (
-                <li className="text-xs text-[var(--muted)]">Aucun document listé.</li>
+                <li className="text-xs text-[var(--muted)]">Aucun document.</li>
               )}
               {documents.map((doc) => (
                 <li
                   key={doc.id}
-                  className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-xs text-[var(--ink)]"
+                  className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-xs"
                 >
-                  <div className="font-semibold">{doc.filename}</div>
-                  <div className="mt-1 text-[var(--muted)]">
+                  <div className="font-medium text-[var(--ink)]">{doc.filename}</div>
+                  <div className="mt-0.5 text-[var(--muted)]">
                     {(doc.file_type || "file").toUpperCase()}
                     {doc.uploaded_at
                       ? ` · ${new Date(doc.uploaded_at).toLocaleString("fr-FR")}`
@@ -208,51 +316,55 @@ export default function Home() {
               ))}
             </ul>
           </div>
-
-          <p className="mt-4 border-t border-[var(--line)] pt-3 text-[11px] text-[var(--muted)]">
-            FastAPI · LangGraph · RAG · MCP
-          </p>
         </aside>
 
-        <section className="flex min-h-0 flex-col bg-[color-mix(in_srgb,white_55%,transparent)]">
-          <header className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
+        <section className="flex min-h-0 flex-col bg-[var(--panel)]">
+          <header className="flex items-center justify-between border-b border-[var(--line)] px-5 py-3.5">
             <div>
               <p
-                className="text-lg text-[var(--ink)]"
+                className="text-base font-semibold text-[var(--ink)]"
                 style={{ fontFamily: "var(--font-display), Georgia, serif" }}
               >
-                Session documentaire
+                Assistant
               </p>
-              <p className="text-xs text-[var(--muted)]">
-                Réponses grounded avec citations issues de vos fichiers
+              <p className="text-[11px] text-[var(--muted)]">
+                Stream · raisonnement agent · sources citées
               </p>
             </div>
-            <span className="inline-flex items-center gap-2 rounded-full border border-[var(--line)] bg-white px-3 py-1 text-xs font-semibold text-[var(--accent-strong)]">
-              <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
-              En ligne
-            </span>
+            <div className="flex items-center gap-2">
+              {lastAssistant?.route && (
+                <span className="rounded-md border border-[var(--line)] bg-[var(--accent-soft)] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[var(--accent-strong)]">
+                  {lastAssistant.route}
+                </span>
+              )}
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-white px-2.5 py-1 text-[11px] font-medium text-[var(--muted)]">
+                <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+                En ligne
+              </span>
+            </div>
           </header>
 
-          <div className="flex-1 space-y-4 overflow-y-auto px-4 py-5 md:px-6">
+          <div className="flex-1 space-y-5 overflow-y-auto px-4 py-5 md:px-8">
             {messages.length === 0 && (
-              <div className="animate-rise mx-auto flex h-full max-w-xl flex-col justify-center">
+              <div className="animate-rise mx-auto flex h-full max-w-2xl flex-col justify-center">
                 <h2
-                  className="text-3xl text-[var(--ink)]"
+                  className="text-[2rem] leading-tight text-[var(--ink)]"
                   style={{ fontFamily: "var(--font-display), Georgia, serif" }}
                 >
-                  Posez une question sur vos documents.
+                  Comment puis-je vous aider ?
                 </h2>
-                <p className="mt-3 text-sm text-[var(--muted)]">
-                  Exemples : chiffres IFRS, compétences d’un CV, politiques
-                  internes.
+                <p className="mt-3 max-w-lg text-sm leading-relaxed text-[var(--muted)]">
+                  Posez une question sur vos documents. L’agent affiche son
+                  raisonnement en direct, puis la réponse avec les fichiers et
+                  lignes utilisés.
                 </p>
-                <div className="mt-5 flex flex-wrap gap-2">
+                <div className="mt-6 flex flex-wrap gap-2">
                   {suggestions.map((s) => (
                     <button
                       key={s}
                       type="button"
                       onClick={() => setInput(s)}
-                      className="rounded-full border border-[var(--line)] bg-white px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
+                      className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-left text-xs font-medium text-[var(--ink)] transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
                     >
                       {s}
                     </button>
@@ -269,66 +381,135 @@ export default function Home() {
                 }`}
               >
                 <div
-                  className={`max-w-[min(42rem,92%)] rounded-2xl px-4 py-3 shadow-sm ${
-                    msg.role === "user"
-                      ? "rounded-br-md bg-[var(--user)] text-white"
-                      : "rounded-bl-md border border-[var(--line)] bg-white"
+                  className={`w-full max-w-[min(48rem,100%)] ${
+                    msg.role === "user" ? "flex justify-end" : ""
                   }`}
                 >
                   {msg.role === "user" ? (
-                    <p className="whitespace-pre-wrap text-sm leading-relaxed">
+                    <div className="max-w-[min(36rem,92%)] rounded-xl rounded-br-sm bg-[var(--user)] px-4 py-3 text-sm leading-relaxed text-white">
                       {msg.content}
-                    </p>
-                  ) : (
-                    <div className="md-body">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {msg.content}
-                      </ReactMarkdown>
                     </div>
-                  )}
-                  {msg.route && (
-                    <div className="mt-3 flex items-center justify-between border-t border-[var(--line)] pt-2 text-[10px] uppercase tracking-[0.12em] text-[var(--muted)]">
-                      <span>Route</span>
-                      <span className="rounded-md bg-[var(--accent-soft)] px-2 py-0.5 font-bold text-[var(--accent-strong)]">
-                        {msg.route}
-                      </span>
+                  ) : (
+                    <div className="space-y-3">
+                      {(msg.reasoning?.length || 0) > 0 && (
+                        <div className="overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--reason-bg)]">
+                          <button
+                            type="button"
+                            onClick={() => setReasoningOpen((v) => !v)}
+                            className="flex w-full items-center justify-between px-3.5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--muted)]"
+                          >
+                            <span>Raisonnement de l’agent</span>
+                            <span>{reasoningOpen ? "Masquer" : "Afficher"}</span>
+                          </button>
+                          {reasoningOpen && (
+                            <ol className="reason-scroll max-h-48 space-y-2 overflow-y-auto border-t border-[var(--line)] px-3.5 py-3">
+                              {msg.reasoning!.map((step, i) => (
+                                <li
+                                  key={`${index}-r-${i}`}
+                                  className="flex gap-2.5 text-[13px] leading-snug text-[var(--ink)]"
+                                >
+                                  <span className="mt-0.5 shrink-0 font-mono text-[10px] font-bold text-[var(--accent)]">
+                                    {String(i + 1).padStart(2, "0")}
+                                  </span>
+                                  <span className="md-body !text-[13px]">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                      {step}
+                                    </ReactMarkdown>
+                                  </span>
+                                </li>
+                              ))}
+                              {msg.streaming && !msg.content && (
+                                <li className="flex items-center gap-1.5 text-xs text-[var(--muted)]">
+                                  <span className="thinking-dot" />
+                                  <span className="thinking-dot" />
+                                  <span className="thinking-dot" />
+                                  <span className="ml-1">Réflexion en cours…</span>
+                                </li>
+                              )}
+                            </ol>
+                          )}
+                        </div>
+                      )}
+
+                      {(msg.content || msg.streaming) && (
+                        <div
+                          className={`rounded-xl border border-[var(--line)] bg-white px-4 py-3.5 shadow-sm ${
+                            msg.streaming ? "stream-cursor" : ""
+                          }`}
+                        >
+                          <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--accent)]">
+                            Réponse
+                          </div>
+                          <div className="md-body">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {msg.content || "_…_"}
+                            </ReactMarkdown>
+                          </div>
+                        </div>
+                      )}
+
+                      {(msg.sources?.length || 0) > 0 && (
+                        <div className="rounded-xl border border-[var(--line)] bg-white px-4 py-3">
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--muted)]">
+                            Sources
+                          </p>
+                          <ul className="mt-2 space-y-2">
+                            {msg.sources!.map((s, i) => (
+                              <li
+                                key={`${index}-s-${i}`}
+                                className="rounded-lg border border-[var(--line)] bg-[var(--bg-elevated)] px-3 py-2"
+                              >
+                                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                                  <span className="text-sm font-semibold text-[var(--ink)]">
+                                    {s.filename}
+                                  </span>
+                                  <span className="text-[11px] font-medium text-[var(--accent-strong)]">
+                                    {s.type === "direct"
+                                      ? "DIRECT"
+                                      : s.type === "tool"
+                                        ? "TOOL / MCP"
+                                        : "RAG"}
+                                  </span>
+                                </div>
+                                <p className="mt-0.5 text-xs text-[var(--muted)]">
+                                  {s.location || s.label || "Source"}
+                                </p>
+                                {s.snippet && (
+                                  <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-[var(--muted)]">
+                                    {s.snippet}
+                                  </p>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
               </div>
             ))}
-
-            {loading && (
-              <div className="flex justify-start">
-                <div className="inline-flex items-center gap-2 rounded-2xl border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--muted)]">
-                  <span className="thinking-dot" />
-                  <span className="thinking-dot" />
-                  <span className="thinking-dot" />
-                  <span className="ml-1">Analyse du corpus…</span>
-                </div>
-              </div>
-            )}
             <div ref={bottomRef} />
           </div>
 
           <form
             onSubmit={handleSendMessage}
-            className="border-t border-[var(--line)] bg-white/80 p-4 backdrop-blur"
+            className="border-t border-[var(--line)] bg-[var(--bg-elevated)] p-4"
           >
-            <div className="flex gap-3">
+            <div className="mx-auto flex max-w-3xl gap-2">
               <input
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Ex. Capitaux propres consolidés OCP 2023…"
-                className="flex-1 rounded-2xl border border-[var(--line)] bg-[var(--bg)] px-4 py-3 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] focus:bg-white"
+                placeholder="Posez votre question à l’assistant…"
+                className="flex-1 rounded-lg border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)]"
               />
               <button
                 type="submit"
                 disabled={loading || !input.trim()}
-                className="rounded-2xl bg-[var(--accent)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:bg-[#9bb5ac]"
+                className="rounded-lg bg-[var(--accent)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-45"
               >
-                Envoyer
+                {loading ? "…" : "Envoyer"}
               </button>
             </div>
           </form>
