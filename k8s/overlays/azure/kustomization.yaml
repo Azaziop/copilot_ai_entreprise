@@ -9,10 +9,10 @@ resources:
 images:
   - name: copilot-backend
     newName: entcopilotacrffl9pp.azurecr.io/copilot-backend
-    newTag: 55bdb2d
+    newTag: a3ebed1
   - name: copilot-frontend
     newName: entcopilotacrffl9pp.azurecr.io/copilot-frontend
-    newTag: 55bdb2d
+    newTag: a3ebed1
 
 patches:
   - path: patch-services-lb.yaml
