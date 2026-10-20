@@ -29,6 +29,13 @@ interface DocItem {
   uploaded_at?: string | null;
 }
 
+interface SessionItem {
+  id: number;
+  title: string;
+  created_at?: string | null;
+  message_count?: number;
+}
+
 type StreamEvent = {
   type: string;
   text?: string;
@@ -36,6 +43,7 @@ type StreamEvent = {
   sources?: SourceItem[];
   answer?: string;
   history_id?: number;
+  session_id?: number;
 };
 
 export default function Home() {
@@ -46,7 +54,10 @@ export default function Home() {
   const [uploadStatus, setUploadStatus] = useState("");
   const [uploading, setUploading] = useState(false);
   const [documents, setDocuments] = useState<DocItem[]>([]);
-  const [reasoningOpen, setReasoningOpen] = useState(true);
+  const [sessions, setSessions] = useState<SessionItem[]>([]);
+  const [sessionId, setSessionId] = useState<number | null>(null);
+  const [reasoningOpen, setReasoningOpen] = useState(false);
+  const [sideTab, setSideTab] = useState<"chats" | "docs">("chats");
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const apiUrl = useMemo(
@@ -63,12 +74,24 @@ export default function Home() {
       const data = (await res.json()) as DocItem[];
       setDocuments(Array.isArray(data) ? data : []);
     } catch {
-      /* backend optional at first paint */
+      /* optional */
+    }
+  };
+
+  const loadSessions = async () => {
+    try {
+      const res = await fetch(`${apiUrl}/sessions`);
+      if (!res.ok) return;
+      const data = (await res.json()) as SessionItem[];
+      setSessions(Array.isArray(data) ? data : []);
+    } catch {
+      /* optional */
     }
   };
 
   useEffect(() => {
     loadDocuments();
+    loadSessions();
   }, [apiUrl]);
 
   useEffect(() => {
@@ -111,6 +134,50 @@ export default function Home() {
     });
   };
 
+  const startNewChat = async () => {
+    try {
+      const res = await fetch(`${apiUrl}/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Nouvelle discussion" }),
+      });
+      if (res.ok) {
+        const s = (await res.json()) as SessionItem;
+        setSessionId(s.id);
+        await loadSessions();
+      } else {
+        setSessionId(null);
+      }
+    } catch {
+      setSessionId(null);
+    }
+    setMessages([]);
+    setInput("");
+    setSideTab("chats");
+  };
+
+  const openSession = async (id: number) => {
+    try {
+      const res = await fetch(`${apiUrl}/sessions/${id}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setSessionId(id);
+      const restored: Message[] = [];
+      for (const m of data.messages || []) {
+        restored.push({ role: "user", content: m.question });
+        restored.push({
+          role: "assistant",
+          content: m.answer,
+          route: m.route_pris,
+        });
+      }
+      setMessages(restored);
+      setReasoningOpen(false);
+    } catch {
+      /* ignore */
+    }
+  };
+
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
     if (!input.trim() || loading) return;
@@ -135,7 +202,10 @@ export default function Home() {
       const res = await fetch(`${apiUrl}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({
+          question,
+          session_id: sessionId,
+        }),
       });
       if (!res.ok || !res.body) {
         const err = await res.json().catch(() => ({}));
@@ -167,7 +237,9 @@ export default function Home() {
             continue;
           }
 
-          if (event.type === "reasoning" && event.text) {
+          if (event.type === "session" && event.session_id) {
+            setSessionId(event.session_id);
+          } else if (event.type === "reasoning" && event.text) {
             appendReasoning(event.text);
           } else if (event.type === "route" && event.route) {
             patchAssistant({ route: event.route });
@@ -179,8 +251,11 @@ export default function Home() {
             patchAssistant({
               ...(event.answer != null ? { content: event.answer } : {}),
               ...(event.route ? { route: event.route } : {}),
+              ...(event.sources ? { sources: event.sources } : {}),
               streaming: false,
             });
+            if (event.session_id) setSessionId(event.session_id);
+            loadSessions();
           } else if (event.type === "error") {
             throw new Error(event.text || "Erreur de stream");
           }
@@ -209,7 +284,7 @@ export default function Home() {
     const formData = new FormData();
     formData.append("file", file);
     setUploading(true);
-    setUploadStatus("Indexation en cours… les gros PDF peuvent prendre 1–2 min.");
+    setUploadStatus("Indexation en cours…");
 
     try {
       const res = await fetch(`${apiUrl}/upload`, {
@@ -242,80 +317,151 @@ export default function Home() {
 
   return (
     <main className="min-h-screen px-0 py-0 md:px-4 md:py-4">
-      <div className="mx-auto grid h-screen max-w-[1400px] overflow-hidden border-0 bg-[var(--panel)] shadow-[var(--shadow)] md:h-[calc(100vh-2rem)] md:grid-cols-[280px_1fr] md:rounded-xl md:border md:border-[var(--line)]">
+      <div className="mx-auto grid h-screen max-w-[1440px] overflow-hidden border-0 bg-[var(--panel)] shadow-[var(--shadow)] md:h-[calc(100vh-2rem)] md:grid-cols-[300px_1fr] md:rounded-2xl md:border md:border-[var(--line)]">
         <aside className="flex flex-col border-b border-[var(--line)] bg-[var(--bg-elevated)] md:border-b-0 md:border-r">
           <div className="animate-rise border-b border-[var(--line)] px-5 py-5">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[var(--accent)]">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[var(--accent-strong)]">
               Enterprise AI
             </p>
             <h1
-              className="mt-1.5 text-[1.65rem] leading-tight text-[var(--ink)]"
+              className="mt-1.5 text-[1.7rem] leading-tight text-[var(--ink)]"
               style={{ fontFamily: "var(--font-display), Georgia, serif" }}
             >
               Copilot
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-[var(--muted)]">
-              Assistant documentaire professionnel — réponses sourcées, raisonnement
-              visible en direct.
+              Blanc & bleu ciel — réponses sourcées, mémoire de conversation.
             </p>
-          </div>
-
-          <form onSubmit={handleUpload} className="space-y-3 px-5 py-4">
-            <label className="block text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--muted)]">
-              Base documentaire
-            </label>
-            <label className="flex cursor-pointer flex-col gap-1 rounded-lg border border-[var(--line)] bg-white px-3 py-3 transition hover:border-[var(--accent)]">
-              <span className="truncate text-sm font-medium text-[var(--ink)]">
-                {file ? file.name : "Importer PDF, TXT, MD, CSV, XLSX"}
-              </span>
-              <span className="text-[11px] text-[var(--muted)]">
-                Indexation locale Chroma · citations fichier / lignes
-              </span>
-              <input
-                type="file"
-                accept=".pdf,.txt,.md,.csv,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
-                className="hidden"
-                onChange={(e) => setFile(e.target.files?.[0] || null)}
-              />
-            </label>
             <button
-              type="submit"
-              disabled={!file || uploading}
-              className="w-full rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-45"
+              type="button"
+              onClick={startNewChat}
+              className="mt-4 w-full rounded-xl bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)]"
             >
-              {uploading ? "Indexation…" : "Indexer"}
+              Nouvelle conversation
             </button>
-            {uploadStatus && (
-              <p className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
-                {uploadStatus}
-              </p>
-            )}
-          </form>
-
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-4">
-            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--muted)]">
-              Corpus ({documents.length})
-            </p>
-            <ul className="space-y-1.5">
-              {documents.length === 0 && (
-                <li className="text-xs text-[var(--muted)]">Aucun document.</li>
-              )}
-              {documents.map((doc) => (
-                <li
-                  key={doc.id}
-                  className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-xs"
-                >
-                  <div className="font-medium text-[var(--ink)]">{doc.filename}</div>
-                  <div className="mt-0.5 text-[var(--muted)]">
-                    {(doc.file_type || "file").toUpperCase()}
-                    {doc.uploaded_at
-                      ? ` · ${new Date(doc.uploaded_at).toLocaleString("fr-FR")}`
-                      : ""}
-                  </div>
-                </li>
-              ))}
-            </ul>
           </div>
+
+          <div className="flex gap-1 border-b border-[var(--line)] px-3 py-2">
+            <button
+              type="button"
+              onClick={() => setSideTab("chats")}
+              className={`flex-1 rounded-lg px-2 py-2 text-xs font-semibold transition ${
+                sideTab === "chats"
+                  ? "bg-white text-[var(--accent-strong)] shadow-sm"
+                  : "text-[var(--muted)] hover:bg-white/70"
+              }`}
+            >
+              Historique
+            </button>
+            <button
+              type="button"
+              onClick={() => setSideTab("docs")}
+              className={`flex-1 rounded-lg px-2 py-2 text-xs font-semibold transition ${
+                sideTab === "docs"
+                  ? "bg-white text-[var(--accent-strong)] shadow-sm"
+                  : "text-[var(--muted)] hover:bg-white/70"
+              }`}
+            >
+              Documents
+            </button>
+          </div>
+
+          {sideTab === "chats" ? (
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+              <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--muted)]">
+                Conversations ({sessions.length})
+              </p>
+              <ul className="space-y-1">
+                {sessions.length === 0 && (
+                  <li className="px-2 text-xs text-[var(--muted)]">
+                    Aucune conversation. Démarrez-en une.
+                  </li>
+                )}
+                {sessions.map((s) => (
+                  <li key={s.id}>
+                    <button
+                      type="button"
+                      onClick={() => openSession(s.id)}
+                      className={`w-full rounded-xl border px-3 py-2.5 text-left transition ${
+                        sessionId === s.id
+                          ? "border-[var(--accent)] bg-white shadow-sm"
+                          : "border-transparent bg-transparent hover:border-[var(--line)] hover:bg-white/80"
+                      }`}
+                    >
+                      <div className="truncate text-sm font-medium text-[var(--ink)]">
+                        {s.title || "Sans titre"}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-[var(--muted)]">
+                        {s.message_count ?? 0} msg
+                        {s.created_at
+                          ? ` · ${new Date(s.created_at).toLocaleDateString("fr-FR")}`
+                          : ""}
+                      </div>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-4 px-1 text-[11px] leading-relaxed text-[var(--muted)]">
+                Mémoire : les 6 derniers échanges de la conversation active sont
+                renvoyés au modèle.
+              </p>
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <form onSubmit={handleUpload} className="space-y-3 border-b border-[var(--line)] px-4 py-3">
+                <label className="flex cursor-pointer flex-col gap-1 rounded-xl border border-dashed border-[var(--line)] bg-white px-3 py-3 transition hover:border-[var(--accent)]">
+                  <span className="truncate text-sm font-medium text-[var(--ink)]">
+                    {file ? file.name : "Importer PDF, TXT, MD, CSV, XLSX"}
+                  </span>
+                  <span className="text-[11px] text-[var(--muted)]">
+                    Indexation Chroma · citations fichier / page
+                  </span>
+                  <input
+                    type="file"
+                    accept=".pdf,.txt,.md,.csv,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+                    className="hidden"
+                    onChange={(e) => setFile(e.target.files?.[0] || null)}
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={!file || uploading}
+                  className="w-full rounded-xl bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  {uploading ? "Indexation…" : "Indexer"}
+                </button>
+                {uploadStatus && (
+                  <p className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-xs text-[var(--muted)]">
+                    {uploadStatus}
+                  </p>
+                )}
+              </form>
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+                <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--muted)]">
+                  Corpus ({documents.length})
+                </p>
+                <ul className="space-y-1.5">
+                  {documents.length === 0 && (
+                    <li className="text-xs text-[var(--muted)]">Aucun document.</li>
+                  )}
+                  {documents.map((doc) => (
+                    <li
+                      key={doc.id}
+                      className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-xs"
+                    >
+                      <div className="font-medium text-[var(--ink)]">{doc.filename}</div>
+                      <div className="mt-0.5 text-[var(--muted)]">
+                        {(doc.file_type || "file").toUpperCase()}
+                        {doc.uploaded_at
+                          ? ` · ${new Date(doc.uploaded_at).toLocaleString("fr-FR")}`
+                          : ""}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
         </aside>
 
         <section className="flex min-h-0 flex-col bg-[var(--panel)]">
@@ -328,16 +474,18 @@ export default function Home() {
                 Assistant
               </p>
               <p className="text-[11px] text-[var(--muted)]">
-                Stream · raisonnement agent · sources citées
+                {sessionId
+                  ? `Conversation #${sessionId} · mémoire active`
+                  : "Nouvelle session · mémoire au premier message"}
               </p>
             </div>
             <div className="flex items-center gap-2">
               {lastAssistant?.route && (
-                <span className="rounded-md border border-[var(--line)] bg-[var(--accent-soft)] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[var(--accent-strong)]">
+                <span className="rounded-lg border border-[var(--line)] bg-[var(--accent-soft)] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[var(--accent-strong)]">
                   {lastAssistant.route}
                 </span>
               )}
-              <span className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-white px-2.5 py-1 text-[11px] font-medium text-[var(--muted)]">
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--line)] bg-white px-2.5 py-1 text-[11px] font-medium text-[var(--muted)]">
                 <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
                 En ligne
               </span>
@@ -354,9 +502,8 @@ export default function Home() {
                   Comment puis-je vous aider ?
                 </h2>
                 <p className="mt-3 max-w-lg text-sm leading-relaxed text-[var(--muted)]">
-                  Posez une question sur vos documents. L’agent affiche son
-                  raisonnement en direct, puis la réponse avec les fichiers et
-                  lignes utilisés.
+                  Posez une question. L’agent stream son raisonnement, répond, puis
+                  n’affiche que les sources réellement utilisées.
                 </p>
                 <div className="mt-6 flex flex-wrap gap-2">
                   {suggestions.map((s) => (
@@ -364,7 +511,7 @@ export default function Home() {
                       key={s}
                       type="button"
                       onClick={() => setInput(s)}
-                      className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-left text-xs font-medium text-[var(--ink)] transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
+                      className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-left text-xs font-medium text-[var(--ink)] transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
                     >
                       {s}
                     </button>
@@ -386,13 +533,13 @@ export default function Home() {
                   }`}
                 >
                   {msg.role === "user" ? (
-                    <div className="max-w-[min(36rem,92%)] rounded-xl rounded-br-sm bg-[var(--user)] px-4 py-3 text-sm leading-relaxed text-white">
+                    <div className="max-w-[min(36rem,92%)] rounded-2xl rounded-br-md bg-[var(--user)] px-4 py-3 text-sm leading-relaxed text-white">
                       {msg.content}
                     </div>
                   ) : (
                     <div className="space-y-3">
                       {(msg.reasoning?.length || 0) > 0 && (
-                        <div className="overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--reason-bg)]">
+                        <div className="overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--reason-bg)]">
                           <button
                             type="button"
                             onClick={() => setReasoningOpen((v) => !v)}
@@ -402,13 +549,13 @@ export default function Home() {
                             <span>{reasoningOpen ? "Masquer" : "Afficher"}</span>
                           </button>
                           {reasoningOpen && (
-                            <ol className="reason-scroll max-h-48 space-y-2 overflow-y-auto border-t border-[var(--line)] px-3.5 py-3">
+                            <ol className="reason-scroll max-h-44 space-y-2 overflow-y-auto border-t border-[var(--line)] px-3.5 py-3">
                               {msg.reasoning!.map((step, i) => (
                                 <li
                                   key={`${index}-r-${i}`}
                                   className="flex gap-2.5 text-[13px] leading-snug text-[var(--ink)]"
                                 >
-                                  <span className="mt-0.5 shrink-0 font-mono text-[10px] font-bold text-[var(--accent)]">
+                                  <span className="mt-0.5 shrink-0 font-mono text-[10px] font-bold text-[var(--accent-strong)]">
                                     {String(i + 1).padStart(2, "0")}
                                   </span>
                                   <span className="md-body !text-[13px]">
@@ -433,11 +580,11 @@ export default function Home() {
 
                       {(msg.content || msg.streaming) && (
                         <div
-                          className={`rounded-xl border border-[var(--line)] bg-white px-4 py-3.5 shadow-sm ${
+                          className={`rounded-2xl border border-[var(--line)] bg-white px-4 py-3.5 ${
                             msg.streaming ? "stream-cursor" : ""
                           }`}
                         >
-                          <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--accent)]">
+                          <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--accent-strong)]">
                             Réponse
                           </div>
                           <div className="md-body">
@@ -448,16 +595,16 @@ export default function Home() {
                         </div>
                       )}
 
-                      {(msg.sources?.length || 0) > 0 && (
-                        <div className="rounded-xl border border-[var(--line)] bg-white px-4 py-3">
+                      {!msg.streaming && (msg.sources?.length || 0) > 0 && (
+                        <div className="rounded-2xl border border-[var(--line)] bg-white px-4 py-3">
                           <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--muted)]">
-                            Sources
+                            Sources utilisées ({msg.sources!.length})
                           </p>
                           <ul className="mt-2 space-y-2">
                             {msg.sources!.map((s, i) => (
                               <li
                                 key={`${index}-s-${i}`}
-                                className="rounded-lg border border-[var(--line)] bg-[var(--bg-elevated)] px-3 py-2"
+                                className="rounded-xl border border-[var(--line)] bg-[var(--bg-elevated)] px-3 py-2"
                               >
                                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                                   <span className="text-sm font-semibold text-[var(--ink)]">
@@ -467,18 +614,13 @@ export default function Home() {
                                     {s.type === "direct"
                                       ? "DIRECT"
                                       : s.type === "tool"
-                                        ? "TOOL / MCP"
+                                        ? "TOOL"
                                         : "RAG"}
                                   </span>
                                 </div>
                                 <p className="mt-0.5 text-xs text-[var(--muted)]">
                                   {s.location || s.label || "Source"}
                                 </p>
-                                {s.snippet && (
-                                  <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-[var(--muted)]">
-                                    {s.snippet}
-                                  </p>
-                                )}
                               </li>
                             ))}
                           </ul>
@@ -502,12 +644,12 @@ export default function Home() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder="Posez votre question à l’assistant…"
-                className="flex-1 rounded-lg border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)]"
+                className="flex-1 rounded-xl border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)]"
               />
               <button
                 type="submit"
                 disabled={loading || !input.trim()}
-                className="rounded-lg bg-[var(--accent)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-45"
+                className="rounded-xl bg-[var(--accent)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-45"
               >
                 {loading ? "…" : "Envoyer"}
               </button>

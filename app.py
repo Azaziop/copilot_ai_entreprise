@@ -9,7 +9,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
-from database import init_db, SessionLocal, ChatHistoryModel, DocumentRecord
+from database import (
+    init_db,
+    SessionLocal,
+    ChatHistoryModel,
+    ChatSession,
+    DocumentRecord,
+)
 from rag import vector_store
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
@@ -41,30 +47,141 @@ def get_db():
 
 class QueryRequest(BaseModel):
     question: str
+    session_id: int | None = None
 
 class QueryResponse(BaseModel):
     answer: str
     route_pris: str
     history_id: int
+    session_id: int | None = None
+
+
+class SessionCreate(BaseModel):
+    title: str | None = None
+
+
+def _ensure_session(db: Session, session_id: int | None, first_question: str) -> ChatSession:
+    if session_id is not None:
+        session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        if session:
+            return session
+    title = (first_question or "Nouvelle discussion").strip()[:80] or "Nouvelle discussion"
+    session = ChatSession(title=title, user_id=None)
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def _session_memory(db: Session, session_id: int | None) -> list[dict]:
+    if not session_id:
+        return []
+    rows = (
+        db.query(ChatHistoryModel)
+        .filter(ChatHistoryModel.session_id == session_id)
+        .order_by(ChatHistoryModel.id.asc())
+        .all()
+    )
+    return [{"question": r.question, "answer": r.answer} for r in rows]
+
 
 @app.get("/")
 def home():
     return {"message": "API Enterprise Copilot modulaire en ligne."}
 
+
+@app.get("/sessions")
+def list_sessions(db: Session = Depends(get_db)):
+    rows = (
+        db.query(ChatSession)
+        .order_by(ChatSession.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return [
+        {
+            "id": s.id,
+            "title": s.title,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+            "message_count": len(s.messages or []),
+        }
+        for s in rows
+    ]
+
+
+@app.post("/sessions")
+def create_session(body: SessionCreate | None = None, db: Session = Depends(get_db)):
+    title = (body.title if body and body.title else "Nouvelle discussion")[:100]
+    session = ChatSession(title=title, user_id=None)
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return {
+        "id": session.id,
+        "title": session.title,
+        "created_at": session.created_at.isoformat() if session.created_at else None,
+        "message_count": 0,
+    }
+
+
+@app.get("/sessions/{session_id}")
+def get_session(session_id: int, db: Session = Depends(get_db)):
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Conversation introuvable.")
+    messages = (
+        db.query(ChatHistoryModel)
+        .filter(ChatHistoryModel.session_id == session_id)
+        .order_by(ChatHistoryModel.id.asc())
+        .all()
+    )
+    return {
+        "id": session.id,
+        "title": session.title,
+        "created_at": session.created_at.isoformat() if session.created_at else None,
+        "messages": [
+            {
+                "id": m.id,
+                "question": m.question,
+                "answer": m.answer,
+                "route_pris": m.route_pris,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in messages
+        ],
+    }
+
+
+@app.delete("/sessions/{session_id}")
+def delete_session(session_id: int, db: Session = Depends(get_db)):
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Conversation introuvable.")
+    db.delete(session)
+    db.commit()
+    return {"ok": True}
+
+
 @app.post("/chat", response_model=QueryResponse)
 def chat_endpoint(request: QueryRequest, db: Session = Depends(get_db)):
     """Compat non-stream (collecte le stream interne)."""
     try:
+        session = _ensure_session(db, request.session_id, request.question)
+        memory = _session_memory(db, session.id)
         answer = ""
         route_pris = "DIRECT"
-        for event in stream_chat(request.question):
+        for event in stream_chat(request.question, history=memory):
             if event.get("type") == "token":
                 answer += event.get("text") or ""
             elif event.get("type") == "done":
                 answer = event.get("answer") or answer
                 route_pris = event.get("route") or route_pris
 
+        if session.title in (None, "", "Nouvelle discussion"):
+            session.title = request.question.strip()[:80]
+
         db_item = ChatHistoryModel(
+            session_id=session.id,
             question=request.question,
             answer=answer,
             route_pris=route_pris,
@@ -77,6 +194,7 @@ def chat_endpoint(request: QueryRequest, db: Session = Depends(get_db)):
             "answer": answer,
             "route_pris": route_pris,
             "history_id": db_item.id,
+            "session_id": session.id,
         }
     except Exception as e:
         db.rollback()
@@ -85,20 +203,28 @@ def chat_endpoint(request: QueryRequest, db: Session = Depends(get_db)):
 
 @app.post("/chat/stream")
 def chat_stream_endpoint(request: QueryRequest, db: Session = Depends(get_db)):
-    """SSE stream: reasoning, route, sources, tokens, done."""
+    """SSE stream: reasoning, route, sources, tokens, done (+ session memory)."""
+    session = _ensure_session(db, request.session_id, request.question)
+    memory = _session_memory(db, session.id)
+    session_id = session.id
 
     def event_gen():
         answer = ""
         route_pris = "DIRECT"
         try:
-            for event in stream_chat(request.question):
+            yield f"data: {json.dumps({'type': 'session', 'session_id': session_id}, ensure_ascii=False)}\n\n"
+            for event in stream_chat(request.question, history=memory):
                 etype = event.get("type")
                 if etype == "token":
                     answer += event.get("text") or ""
                 elif etype == "done":
                     answer = event.get("answer") or answer
                     route_pris = event.get("route") or route_pris
+                    sess = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+                    if sess and sess.title in (None, "", "Nouvelle discussion"):
+                        sess.title = request.question.strip()[:80]
                     db_item = ChatHistoryModel(
+                        session_id=session_id,
                         question=request.question,
                         answer=answer,
                         route_pris=route_pris,
@@ -106,7 +232,11 @@ def chat_stream_endpoint(request: QueryRequest, db: Session = Depends(get_db)):
                     db.add(db_item)
                     db.commit()
                     db.refresh(db_item)
-                    event = {**event, "history_id": db_item.id}
+                    event = {
+                        **event,
+                        "history_id": db_item.id,
+                        "session_id": session_id,
+                    }
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:
             db.rollback()

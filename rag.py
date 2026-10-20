@@ -76,53 +76,122 @@ def _doc_location(meta: dict, line_count: int) -> str:
             page = int(meta["page"]) + 1
         except (TypeError, ValueError):
             page = meta["page"]
-        return f"page {page}, {line_count} ligne(s) dans le passage"
-    return f"{line_count} ligne(s) dans le passage"
+        return f"page {page} · {line_count} ligne(s)"
+    return f"{line_count} ligne(s)"
 
 
-def retrieve_with_sources(question: str, k: int = 10):
-    """Return (documents, source dicts with filename + location/lines)."""
+def _page_key(meta: dict, filename: str) -> tuple:
+    if meta.get("page") is not None:
+        return (filename, "page", meta.get("page"))
+    if meta.get("row_start") is not None:
+        return (filename, "rows", meta.get("row_start"), meta.get("row_end"), meta.get("sheet"))
+    return (filename, "chunk", meta.get("start_index") or id(meta))
+
+
+def _source_from_doc(doc) -> dict:
+    meta = dict(doc.metadata or {})
+    raw_source = meta.get("source") or meta.get("filename") or "document"
+    filename = Path(str(raw_source)).name
+    line_count = max(1, doc.page_content.count("\n") + 1)
+    location = _doc_location(meta, line_count)
+    return {
+        "type": "rag",
+        "filename": filename,
+        "location": location,
+        "lines": line_count,
+        "page": meta.get("page"),
+        "row_start": meta.get("row_start"),
+        "row_end": meta.get("row_end"),
+        "sheet": meta.get("sheet") or None,
+        "label": f"{filename} — {location}",
+        "snippet": doc.page_content[:220].replace("\n", " "),
+        "_content": doc.page_content,
+    }
+
+
+def retrieve_with_sources(question: str, k: int = 8):
+    """Return (documents, source dicts) — one passage per page/file location."""
     docs = retriever.invoke(question)
     if k and len(docs) > k:
         docs = docs[:k]
-    sources = []
-    seen = set()
+
+    deduped_docs = []
+    seen_pages = set()
     for doc in docs:
         meta = dict(doc.metadata or {})
         raw_source = meta.get("source") or meta.get("filename") or "document"
         filename = Path(str(raw_source)).name
-        line_count = max(1, doc.page_content.count("\n") + 1)
-        location = _doc_location(meta, line_count)
-        key = (filename, location, doc.page_content[:80])
+        key = _page_key(meta, filename)
+        if key in seen_pages:
+            continue
+        seen_pages.add(key)
+        deduped_docs.append(doc)
+
+    sources = [_source_from_doc(d) for d in deduped_docs]
+    return deduped_docs, sources
+
+
+def select_cited_sources(answer: str, sources: list[dict], max_n: int = 3) -> list[dict]:
+    """Keep only sources that actually support the answer (number/phrase overlap)."""
+    import re
+
+    if not answer or not sources:
+        return []
+
+    answer_norm = answer.lower()
+    nums = set(re.findall(r"\d[\d\s]*\d|\d+", answer.replace("\u00a0", " ")))
+    nums = {re.sub(r"\s+", "", n) for n in nums if len(re.sub(r"\s+", "", n)) >= 2}
+
+    scored: list[tuple[float, dict]] = []
+    for src in sources:
+        content = (src.get("_content") or src.get("snippet") or "").lower()
+        if not content:
+            continue
+        score = 0.0
+        content_compact = re.sub(r"\s+", "", content)
+        for n in nums:
+            if n in content_compact:
+                score += 2.5
+        # distinctive 4+ letter tokens from answer present in passage
+        tokens = {
+            t
+            for t in re.findall(r"[a-zàâäéèêëïîôùûüç]{5,}", answer_norm)
+            if t not in {"selon", "dapres", "extrait", "millions", "dirhams", "groupe", "total"}
+        }
+        hits = sum(1 for t in tokens if t in content)
+        score += min(hits, 6) * 0.4
+        if score > 0:
+            scored.append((score, src))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # fallback: if nothing matched numbers, keep top 1–2 retrieval hits
+    if not scored:
+        scored = [(1.0, s) for s in sources[:2]]
+
+    selected = []
+    seen = set()
+    for _, src in scored:
+        key = (src.get("filename"), src.get("location"))
         if key in seen:
             continue
         seen.add(key)
-        sources.append(
-            {
-                "type": "rag",
-                "filename": filename,
-                "location": location,
-                "lines": line_count,
-                "page": meta.get("page"),
-                "row_start": meta.get("row_start"),
-                "row_end": meta.get("row_end"),
-                "sheet": meta.get("sheet") or None,
-                "label": f"{filename} — {location}",
-                "snippet": doc.page_content[:220].replace("\n", " "),
-            }
-        )
-    return docs, sources
+        clean = {k: v for k, v in src.items() if not k.startswith("_")}
+        selected.append(clean)
+        if len(selected) >= max_n:
+            break
+    return selected
 
 
 def format_docs_for_prompt(docs) -> str:
     parts = []
-    for doc in docs:
+    for i, doc in enumerate(docs, start=1):
         meta = doc.metadata or {}
         raw_source = meta.get("source") or meta.get("filename") or "document"
         filename = Path(str(raw_source)).name
         line_count = max(1, doc.page_content.count("\n") + 1)
         loc = _doc_location(meta, line_count)
-        parts.append(f"[Source: {filename} | {loc}]\n{doc.page_content}")
+        parts.append(f"[Passage {i} | {filename} | {loc}]\n{doc.page_content}")
     return "\n\n---\n\n".join(parts)
 
 

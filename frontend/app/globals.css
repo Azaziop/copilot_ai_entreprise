@@ -1,18 +1,18 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #eef1f4;
-  --bg-elevated: #f7f8fa;
+  --bg: #f0f7fc;
+  --bg-elevated: #f7fbfe;
   --panel: #ffffff;
-  --ink: #0f1720;
-  --muted: #5a6570;
-  --line: #d8dee6;
-  --accent: #0d5c63;
-  --accent-soft: #e6f2f3;
-  --accent-strong: #094348;
-  --user: #1a2332;
-  --reason-bg: #f0f3f6;
-  --shadow: 0 1px 0 rgba(15, 23, 32, 0.04), 0 12px 40px rgba(15, 23, 32, 0.06);
+  --ink: #0c2340;
+  --muted: #5a738c;
+  --line: #d4e4f2;
+  --accent: #3b9dd9;
+  --accent-soft: #e8f4fc;
+  --accent-strong: #1e7bb8;
+  --user: #2b8fc9;
+  --reason-bg: #f3f9fd;
+  --shadow: 0 1px 0 rgba(30, 123, 184, 0.04), 0 14px 40px rgba(30, 100, 160, 0.08);
   --font-display: var(--font-display);
   --font-body: var(--font-body);
 }
@@ -37,7 +37,9 @@ body {
   color: var(--ink);
   font-family: var(--font-body), "Segoe UI", sans-serif;
   background:
-    linear-gradient(165deg, #e8eef2 0%, var(--bg) 42%, #e4e9ee 100%);
+    radial-gradient(1200px 600px at 10% -10%, #dff0fb 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, #eaf6fd 0%, transparent 50%),
+    linear-gradient(180deg, #f7fbfe 0%, var(--bg) 45%, #eef6fb 100%);
 }
 
 @keyframes rise-in {
@@ -105,7 +107,7 @@ body {
 
 .reason-scroll {
   scrollbar-width: thin;
-  scrollbar-color: #c5ced8 transparent;
+  scrollbar-color: #b7d4ea transparent;
 }
 
 .md-body {
@@ -165,7 +167,7 @@ body {
 .md-body code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.85em;
-  background: #eef2f6;
+  background: var(--accent-soft);
   border: 1px solid var(--line);
   border-radius: 0.3rem;
   padding: 0.08rem 0.3rem;
@@ -173,8 +175,8 @@ body {
 
 .md-body pre {
   overflow-x: auto;
-  background: #15202b;
-  color: #e7eef5;
+  background: #12324a;
+  color: #e8f4fc;
   border-radius: 0.6rem;
   padding: 0.85rem 1rem;
   margin: 0.7rem 0;
