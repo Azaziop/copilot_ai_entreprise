@@ -5,15 +5,12 @@ name: Platform bootstrap
 
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows: ["Terraform Azure"]
-    types: [completed]
   push:
     branches: [main, master]
     paths:
       - "argocd/**"
       - ".github/workflows/platform.yaml"
-      - "k8s/overlays/azure/ingress.yaml"
+      - "k8s/overlays/azure/**"
 
 permissions:
   id-token: write
@@ -27,9 +24,6 @@ env:
 jobs:
   bootstrap:
     name: Secrets / Ingress / Argo Application
-    if: >
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     environment: azure-prod
     steps:

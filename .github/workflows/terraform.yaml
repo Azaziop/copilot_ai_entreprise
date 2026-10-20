@@ -5,6 +5,8 @@ on:
     paths:
       - "terraform/**"
       - ".github/workflows/terraform.yaml"
+  # Push CI only when remote state is configured (see job if:).
+  # Without TF_STATE_STORAGE_ACCOUNT, empty local state makes plan useless/noisy.
   push:
     branches: [main, master]
     paths:
@@ -28,6 +30,10 @@ env:
 jobs:
   plan:
     name: Terraform plan
+    # Skip push runs until remote state exists (avoid empty-state false failures)
+    if: >
+      github.event_name != 'push' ||
+      vars.TF_STATE_STORAGE_ACCOUNT != ''
     runs-on: ubuntu-latest
     environment: azure-prod
     defaults:
