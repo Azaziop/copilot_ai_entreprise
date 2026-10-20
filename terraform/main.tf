@@ -84,9 +84,11 @@ resource "helm_release" "argocd" {
     value = "true"
   }
 
+  # ClusterIP: free public IP quota (subscription often capped at 3 in a region).
+  # Access UI with: kubectl -n argocd port-forward svc/argo-cd-argocd-server 8080:443
   set {
     name  = "server.service.type"
-    value = "LoadBalancer"
+    value = "ClusterIP"
   }
 
   depends_on = [

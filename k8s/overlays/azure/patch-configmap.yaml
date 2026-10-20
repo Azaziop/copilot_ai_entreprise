@@ -5,4 +5,4 @@ metadata:
 data:
   # After first deploy, replace with the public backend LoadBalancer IP/hostname
   # rebuilt into the frontend image via CI --build-arg NEXT_PUBLIC_API_URL
-  NEXT_PUBLIC_API_URL: "http://PENDING_BACKEND_LB_IP"
+  NEXT_PUBLIC_API_URL: "http://51.103.56.176:8000"

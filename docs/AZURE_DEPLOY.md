@@ -91,10 +91,12 @@ kubectl -n enterprise-copilot create secret generic rag-secrets \
 If Terraform `argocd_enabled=true`, Argo CD is installed in namespace `argocd` (server Service type LoadBalancer).
 
 ```bash
-kubectl -n argocd get svc
-# get admin password
+# Argo CD UI (ClusterIP — frees a public IP for the app LBs)
+kubectl -n argocd port-forward svc/argo-cd-argocd-server 8080:443
+# get admin password (user: admin)
 kubectl -n argocd get secret argocd-initial-admin-secret \
   -o jsonpath='{.data.password}' | base64 -d; echo
+# open https://localhost:8080
 ```
 
 Apply the Argo CD Application **after** `terraform apply` (it cannot be planned before AKS exists):
