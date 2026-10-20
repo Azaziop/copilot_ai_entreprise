@@ -1,0 +1,118 @@
+---
+# Azure prep before bootstrap: verify subscription, AKS, ACR, refresh kubeconfig.
+#
+# Prerequisites (on the host, once):
+#   az login
+#
+# Docker (Windows):
+#   docker compose run --rm azure
+#
+# Native (Linux/macOS with Azure CLI):
+#   ansible-playbook playbooks/prepare_azure.yml
+
+- name: Prepare Azure context for AKS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Require Azure CLI
+      ansible.builtin.command: az version --output json
+      register: az_version
+      changed_when: false
+      failed_when: az_version.rc != 0
+
+    - name: Show active Azure account
+      ansible.builtin.command: az account show --output json
+      register: az_account
+      changed_when: false
+
+    - name: Parse account
+      ansible.builtin.set_fact:
+        azure_subscription_id: "{{ (az_account.stdout | from_json).id }}"
+        azure_subscription_name: "{{ (az_account.stdout | from_json).name }}"
+        azure_tenant_id: "{{ (az_account.stdout | from_json).tenantId }}"
+
+    - name: Check AKS cluster exists
+      ansible.builtin.command: >-
+        az aks show
+        --resource-group {{ aks_resource_group }}
+        --name {{ aks_name }}
+        --output json
+      register: aks_show
+      changed_when: false
+
+    - name: Parse AKS
+      ansible.builtin.set_fact:
+        aks_fqdn: "{{ (aks_show.stdout | from_json).fqdn | default('') }}"
+        aks_power_state: "{{ (aks_show.stdout | from_json).powerState.code | default('Unknown') }}"
+        aks_k8s_version: "{{ (aks_show.stdout | from_json).kubernetesVersion | default('') }}"
+        aks_node_rg: "{{ (aks_show.stdout | from_json).nodeResourceGroup | default('') }}"
+
+    - name: Fail if AKS is not Running
+      ansible.builtin.assert:
+        that:
+          - aks_power_state == "Running"
+        fail_msg: "AKS {{ aks_name }} powerState={{ aks_power_state }} (expected Running)"
+
+    - name: Refresh kubeconfig for AKS
+      ansible.builtin.command: >-
+        az aks get-credentials
+        --resource-group {{ aks_resource_group }}
+        --name {{ aks_name }}
+        --overwrite-existing
+      register: aks_creds
+      changed_when: true
+
+    - name: List ACRs in resource group
+      ansible.builtin.command: >-
+        az acr list
+        --resource-group {{ aks_resource_group }}
+        --query "[].{name:name, loginServer:loginServer, sku:sku.name}"
+        --output json
+      register: acr_list
+      changed_when: false
+
+    - name: Parse ACR list
+      ansible.builtin.set_fact:
+        acr_items: "{{ acr_list.stdout | from_json }}"
+
+    - name: Resolve ACR by name when acr_name is set
+      when: acr_name | length > 0
+      ansible.builtin.set_fact:
+        acr_info: "{{ acr_items | selectattr('name', 'equalto', acr_name) | list | first | default({}) }}"
+
+    - name: Resolve ACR as first in resource group
+      when: acr_name | length == 0
+      ansible.builtin.set_fact:
+        acr_info: "{{ acr_items[0] | default({}) }}"
+
+    - name: Require at least one ACR
+      ansible.builtin.assert:
+        that:
+          - acr_info is mapping
+          - acr_info.name is defined
+        fail_msg: "No ACR found in {{ aks_resource_group }} (set acr_name in group_vars if needed)"
+
+    - name: Probe Kubernetes API
+      kubernetes.core.k8s_info:
+        kind: Namespace
+        name: default
+      register: k8s_probe
+      failed_when: false
+
+    - name: Azure prep summary
+      ansible.builtin.debug:
+        msg:
+          - "Subscription: {{ azure_subscription_name }} ({{ azure_subscription_id }})"
+          - "Tenant: {{ azure_tenant_id }}"
+          - "AKS: {{ aks_name }} / {{ aks_resource_group }} — {{ aks_power_state }} — k8s {{ aks_k8s_version }}"
+          - "AKS FQDN: {{ aks_fqdn }}"
+          - "Node RG: {{ aks_node_rg }}"
+          - "ACR: {{ acr_info.name }} → {{ acr_info.loginServer }} ({{ acr_info.sku }})"
+          - "kubeconfig: refreshed (az aks get-credentials)"
+          - >-
+            Kubernetes API: {{ 'OK' if (k8s_probe.resources | default([]) | length) > 0 else 'check kubeconfig / kubelogin' }}
+          - "Next: docker compose run --rm -e PLAYBOOK=playbooks/bootstrap.yml ansible"

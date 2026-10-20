@@ -1,0 +1,50 @@
+# From ansible/:
+#   docker compose run --rm azure
+#   docker compose run --rm -e PLAYBOOK=playbooks/bootstrap.yml ansible
+#   docker compose run --rm -e PLAYBOOK=playbooks/status.yml ansible
+#
+# Host prerequisite: az login (credentials mounted from %USERPROFILE%\.azure)
+
+services:
+  # Azure CLI + Ansible: get-credentials, AKS/ACR checks
+  azure:
+    image: mcr.microsoft.com/azure-cli:2.67.0
+    working_dir: /work/ansible
+    environment:
+      PLAYBOOK: playbooks/prepare_azure.yml
+      ANSIBLE_CONFIG: /work/ansible/ansible.cfg
+      ANSIBLE_COLLECTIONS_PATH: /work/ansible/.collections
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+    volumes:
+      - ..:/work
+      - ${USERPROFILE:-${HOME}}/.kube:/root/.kube
+      - ${USERPROFILE:-${HOME}}/.azure:/root/.azure
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        set -e
+        chmod -R go-w /work/ansible 2>/dev/null || true
+        python -m pip install -q --break-system-packages ansible-core kubernetes PyYAML
+        export PATH="$(python -c 'import sysconfig; print(sysconfig.get_path("scripts"))'):$$PATH"
+        ansible-galaxy collection install -r requirements.yml -p .collections
+        ansible-playbook -i inventory/hosts.yml "$${PLAYBOOK:-playbooks/prepare_azure.yml}"
+
+  # K8s bootstrap / status (needs kubeconfig; run azure service first if needed)
+  ansible:
+    image: cytopia/ansible:latest-tools
+    working_dir: /work/ansible
+    environment:
+      PLAYBOOK: playbooks/bootstrap.yml
+      ANSIBLE_CONFIG: /work/ansible/ansible.cfg
+      ANSIBLE_COLLECTIONS_PATH: /work/ansible/.collections
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+    volumes:
+      - ..:/work
+      - ${USERPROFILE:-${HOME}}/.kube:/root/.kube:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        chmod -R go-w /work/ansible 2>/dev/null || true
+        && pip install -q kubernetes PyYAML
+        && ansible-galaxy collection install -r requirements.yml -p .collections
+        && ansible-playbook -i inventory/hosts.yml "$$PLAYBOOK"

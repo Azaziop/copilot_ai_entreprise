@@ -1,0 +1,170 @@
+---
+# Post-Terraform AKS bootstrap: namespace, rag-secrets, Argo CD Application.
+#
+# Prerequisites:
+#   az aks get-credentials -g rg-entcopilot -n aks-entcopilot --overwrite-existing
+#   ansible-galaxy collection install -r requirements.yml
+#
+# Usage (from ansible/):
+#   ansible-playbook playbooks/bootstrap.yml
+#   # reads ../.env by default (OPENROUTER_API_KEY, LANGCHAIN_API_KEY)
+
+- name: Bootstrap Enterprise Copilot on AKS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Resolve kubeconfig path
+      ansible.builtin.set_fact:
+        kubeconfig_path: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') ~ '/.kube/config', true) }}"
+
+    - name: Stat repo .env
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../../.env"
+      register: dotenv_stat
+
+    - name: Parse repo .env with Python
+      when: dotenv_stat.stat.exists
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json, pathlib, re
+            env = {}
+            for raw in pathlib.Path("{{ dotenv_stat.stat.path }}").read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                env[key.strip()] = re.sub(r'^["\']|["\']$', "", val.strip())
+            print(json.dumps(env))
+      register: dotenv_json
+      changed_when: false
+      no_log: true
+
+    - name: Resolve API keys (.env / env / -e)
+      ansible.builtin.set_fact:
+        openrouter_api_key: >-
+          {{
+            (openrouter_api_key | default('', true) | trim)
+            or (lookup('env', 'OPENROUTER_API_KEY') | default('', true) | trim)
+            or ((dotenv_json.stdout | default('{}', true) | from_json).OPENROUTER_API_KEY | default('', true) | trim)
+          }}
+        langchain_api_key: >-
+          {{
+            (langchain_api_key | default('', true) | trim)
+            or (lookup('env', 'LANGCHAIN_API_KEY') | default('', true) | trim)
+            or ((dotenv_json.stdout | default('{}', true) | from_json).LANGCHAIN_API_KEY | default('', true) | trim)
+          }}
+      no_log: true
+
+    - name: Require API keys for rag-secrets
+      ansible.builtin.assert:
+        that:
+          - openrouter_api_key | length > 0
+          - langchain_api_key | length > 0
+        fail_msg: >-
+          Missing keys. Put OPENROUTER_API_KEY and LANGCHAIN_API_KEY in the
+          repo .env, export them, or pass -e @vars/secrets.yml.
+
+    - name: Ensure application namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ app_namespace }}"
+
+    - name: Upsert rag-secrets
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: rag-secrets
+            namespace: "{{ app_namespace }}"
+          type: Opaque
+          stringData:
+            OPENROUTER_API_KEY: "{{ openrouter_api_key }}"
+            LANGCHAIN_API_KEY: "{{ langchain_api_key }}"
+      no_log: true
+
+    - name: Apply Argo CD Application
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        src: "{{ argocd_application_manifest | realpath }}"
+
+    - name: Force Argo CD server Service to ClusterIP
+      when: argocd_force_clusterip | bool
+      block:
+        - name: Check Argo CD server Service exists
+          kubernetes.core.k8s_info:
+            kubeconfig: "{{ kubeconfig_path }}"
+            api_version: v1
+            kind: Service
+            name: "{{ argocd_server_service }}"
+            namespace: "{{ argocd_namespace }}"
+          register: argocd_svc
+          failed_when: false
+
+        - name: Patch Argo CD server to ClusterIP
+          when: argocd_svc.resources | length > 0
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: present
+            kind: Service
+            name: "{{ argocd_server_service }}"
+            namespace: "{{ argocd_namespace }}"
+            definition:
+              spec:
+                type: ClusterIP
+            merge_type:
+              - merge
+
+    - name: Wait for backend and frontend Deployments
+      when: wait_for_workloads | bool
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ item }}"
+        namespace: "{{ app_namespace }}"
+        wait: true
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: "{{ workload_wait_timeout }}"
+      loop:
+        - rag-backend
+        - rag-frontend
+      register: wait_deploys
+      failed_when: false
+
+    - name: Show Service EXTERNAL-IPs
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: v1
+        kind: Service
+        namespace: "{{ app_namespace }}"
+      register: app_svcs
+
+    - name: Bootstrap summary
+      ansible.builtin.debug:
+        msg:
+          - "Namespace {{ app_namespace }} ready; rag-secrets applied."
+          - "Argo Application applied from argocd/application.yaml"
+          - >-
+            Services:
+            {% for s in app_svcs.resources %}
+            {{ s.metadata.name }}={{ s.status.loadBalancer.ingress[0].ip | default(s.spec.clusterIP) }}
+            {% endfor %}
+          - "Argo UI: kubectl -n argocd port-forward svc/{{ argocd_server_service }} 8080:443"

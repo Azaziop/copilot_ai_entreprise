@@ -1,0 +1,25 @@
+---
+# Azure (Terraform outputs / defaults)
+aks_resource_group: rg-entcopilot
+aks_name: aks-entcopilot
+# Optional pin; leave empty to use the first ACR in the RG
+acr_name: ""
+
+app_namespace: enterprise-copilot
+argocd_namespace: argocd
+argocd_server_service: argo-cd-argocd-server
+
+# playbooks/ -> ansible/ -> repo root
+repo_root: "{{ playbook_dir }}/../.."
+
+argocd_application_manifest: "{{ repo_root }}/argocd/application.yaml"
+argocd_clusterip_patch: "{{ repo_root }}/argocd/patch-server-clusterip.yaml"
+
+argocd_force_clusterip: true
+wait_for_workloads: true
+workload_wait_timeout: 300
+
+# Secrets: repo .env, then env, then -e
+dotenv_file: "{{ repo_root }}/.env"
+openrouter_api_key: ""
+langchain_api_key: ""

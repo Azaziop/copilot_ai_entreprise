@@ -1,0 +1,62 @@
+---
+
+
+- name: Status Enterprise Copilot on AKS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Resolve kubeconfig path
+      ansible.builtin.set_fact:
+        kubeconfig_path: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env', 'HOME') ~ '/.kube/config', true) }}"
+
+    - name: Argo CD Application
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: argoproj.io/v1alpha1
+        kind: Application
+        name: enterprise-copilot
+        namespace: "{{ argocd_namespace }}"
+      register: argo_app
+      failed_when: false
+
+    - name: Workload pods
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: v1
+        kind: Pod
+        namespace: "{{ app_namespace }}"
+        label_selectors:
+          - "app in (rag-backend, rag-frontend)"
+      register: app_pods
+      failed_when: false
+
+    - name: Services
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: v1
+        kind: Service
+        namespace: "{{ app_namespace }}"
+      register: app_svcs
+      failed_when: false
+
+    - name: Status report
+      ansible.builtin.debug:
+        msg:
+          - >-
+            Argo sync={{ argo_app.resources[0].status.sync.status | default('N/A') }}
+            health={{ argo_app.resources[0].status.health.status | default('N/A') }}
+          - >-
+            Pods:
+            {% for p in app_pods.resources | default([]) %}
+            {{ p.metadata.name }}={{ p.status.phase }}
+            {% endfor %}
+          - >-
+            Services:
+            {% for s in app_svcs.resources | default([]) %}
+            {{ s.metadata.name }} type={{ s.spec.type }}
+            external={{ s.status.loadBalancer.ingress[0].ip | default('pending') }}
+            {% endfor %}
