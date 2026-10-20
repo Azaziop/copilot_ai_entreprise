@@ -10,10 +10,10 @@ resources:
 images:
   - name: copilot-backend
     newName: entcopilotacrffl9pp.azurecr.io/copilot-backend
-    newTag: a3ebed1
+    newTag: 567a4b4
   - name: copilot-frontend
     newName: entcopilotacrffl9pp.azurecr.io/copilot-frontend
-    newTag: a3ebed1
+    newTag: 567a4b4
 
 patches:
   - path: patch-services-clusterip.yaml
