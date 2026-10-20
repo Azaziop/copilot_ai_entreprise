@@ -61,28 +61,26 @@ jobs:
             echo "login_server=$SERVER" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Resolve PUBLIC_API_URL (Ingress /api)
+      - name: Resolve PUBLIC_API_URL (Ingress /api preferred)
         id: apiurl
         run: |
+          chmod +x scripts/wait_ingress_ip.sh
+          # Prefer live Ingress IP (repo var may be stale after LB→Ingress cutover)
+          if kubectl -n ingress-nginx get svc ingress-nginx-controller >/dev/null 2>&1; then
+            IP=$(INGRESS_WAIT_TIMEOUT=180 scripts/wait_ingress_ip.sh || true)
+            if [ -n "${IP:-}" ]; then
+              echo "url=http://${IP}/api" >> "$GITHUB_OUTPUT"
+              echo "Resolved Ingress API URL: http://${IP}/api"
+              exit 0
+            fi
+          fi
           if [ -n "${{ vars.PUBLIC_API_URL }}" ]; then
             echo "url=${{ vars.PUBLIC_API_URL }}" >> "$GITHUB_OUTPUT"
-            echo "Using repo variable PUBLIC_API_URL"
+            echo "Fallback repo variable PUBLIC_API_URL"
             exit 0
           fi
-          chmod +x scripts/wait_ingress_ip.sh
-          # Ensure controller exists (idempotent)
-          if ! kubectl -n ingress-nginx get svc ingress-nginx-controller >/dev/null 2>&1; then
-            echo "ingress-nginx missing — install via Platform bootstrap workflow first"
-            echo "url=http://PENDING_INGRESS_IP/api" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          IP=$(INGRESS_WAIT_TIMEOUT=180 scripts/wait_ingress_ip.sh || true)
-          if [ -n "${IP:-}" ]; then
-            echo "url=http://${IP}/api" >> "$GITHUB_OUTPUT"
-            echo "Resolved Ingress API URL: http://${IP}/api"
-          else
-            echo "url=http://PENDING_INGRESS_IP/api" >> "$GITHUB_OUTPUT"
-          fi
+          echo "url=http://PENDING_INGRESS_IP/api" >> "$GITHUB_OUTPUT"
+          echo "WARNING: no Ingress IP and no PUBLIC_API_URL"
 
       - name: Image tag
         id: meta

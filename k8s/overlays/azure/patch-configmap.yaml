@@ -5,4 +5,4 @@ metadata:
 data:
   # Browser calls the public Ingress; CI rebuilds the frontend image with the real IP.
   # Path /api is rewritten to / on the backend by ingress.yaml
-  NEXT_PUBLIC_API_URL: "http://51.103.56.176:8000"
+  NEXT_PUBLIC_API_URL: "http://20.74.119.115/api"
