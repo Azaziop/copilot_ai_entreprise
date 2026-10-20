@@ -6,14 +6,13 @@ namespace: enterprise-copilot
 resources:
   - ../../base
 
-# CI updates newName/newTag after each ACR push
 images:
   - name: copilot-backend
-    newName: ACR_LOGIN_SERVER_PLACEHOLDER/copilot-backend
-    newTag: latest
+    newName: entcopilotacrffl9pp.azurecr.io/copilot-backend
+    newTag: 732b953
   - name: copilot-frontend
-    newName: ACR_LOGIN_SERVER_PLACEHOLDER/copilot-frontend
-    newTag: latest
+    newName: entcopilotacrffl9pp.azurecr.io/copilot-frontend
+    newTag: 732b953
 
 patches:
   - path: patch-services-lb.yaml
