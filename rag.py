@@ -131,8 +131,8 @@ def retrieve_with_sources(question: str, k: int = 8):
     return deduped_docs, sources
 
 
-def select_cited_sources(answer: str, sources: list[dict], max_n: int = 3) -> list[dict]:
-    """Keep only sources that actually support the answer (number/phrase overlap)."""
+def select_cited_sources(answer: str, sources: list[dict], max_n: int = 2) -> list[dict]:
+    """Keep supporting passages, then collapse to one card per filename."""
     import re
 
     if not answer or not sources:
@@ -141,6 +141,23 @@ def select_cited_sources(answer: str, sources: list[dict], max_n: int = 3) -> li
     answer_norm = answer.lower()
     nums = set(re.findall(r"\d[\d\s]*\d|\d+", answer.replace("\u00a0", " ")))
     nums = {re.sub(r"\s+", "", n) for n in nums if len(re.sub(r"\s+", "", n)) >= 2}
+
+    tokens = {
+        t
+        for t in re.findall(r"[a-zàâäéèêëïîôùûüç]{5,}", answer_norm)
+        if t
+        not in {
+            "selon",
+            "dapres",
+            "extrait",
+            "millions",
+            "dirhams",
+            "groupe",
+            "total",
+            "capitaux",
+            "propres",
+        }
+    }
 
     scored: list[tuple[float, dict]] = []
     for src in sources:
@@ -152,35 +169,67 @@ def select_cited_sources(answer: str, sources: list[dict], max_n: int = 3) -> li
         for n in nums:
             if n in content_compact:
                 score += 2.5
-        # distinctive 4+ letter tokens from answer present in passage
-        tokens = {
-            t
-            for t in re.findall(r"[a-zàâäéèêëïîôùûüç]{5,}", answer_norm)
-            if t not in {"selon", "dapres", "extrait", "millions", "dirhams", "groupe", "total"}
-        }
         hits = sum(1 for t in tokens if t in content)
         score += min(hits, 6) * 0.4
         if score > 0:
             scored.append((score, src))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-
-    # fallback: if nothing matched numbers, keep top 1–2 retrieval hits
     if not scored:
-        scored = [(1.0, s) for s in sources[:2]]
+        scored = [(1.0, s) for s in sources[:1]]
 
-    selected = []
-    seen = set()
-    for _, src in scored:
-        key = (src.get("filename"), src.get("location"))
-        if key in seen:
-            continue
-        seen.add(key)
-        clean = {k: v for k, v in src.items() if not k.startswith("_")}
-        selected.append(clean)
-        if len(selected) >= max_n:
-            break
-    return selected
+    # One UI card per filename (aggregate cited pages)
+    by_file: dict[str, dict] = {}
+    for score, src in scored:
+        fn = src.get("filename") or "document"
+        page = src.get("page")
+        try:
+            page_disp = int(page) + 1 if page is not None else None
+        except (TypeError, ValueError):
+            page_disp = page
+
+        if fn not in by_file:
+            by_file[fn] = {
+                "type": src.get("type") or "rag",
+                "filename": fn,
+                "pages": [],
+                "locations": [],
+                "lines": src.get("lines"),
+                "label": fn,
+                "_score": score,
+            }
+        entry = by_file[fn]
+        entry["_score"] = max(entry["_score"], score)
+        if page_disp is not None and page_disp not in entry["pages"] and len(entry["pages"]) < 3:
+            entry["pages"].append(page_disp)
+        loc = src.get("location")
+        if loc and loc not in entry["locations"] and len(entry["locations"]) < 3:
+            entry["locations"].append(loc)
+
+    ordered = sorted(by_file.values(), key=lambda e: e["_score"], reverse=True)[:max_n]
+    result = []
+    for entry in ordered:
+        pages = entry.pop("pages", [])
+        locs = entry.pop("locations", [])
+        entry.pop("_score", None)
+        if pages:
+            pages_sorted = sorted(pages)
+            entry["location"] = (
+                f"page {pages_sorted[0]}"
+                if len(pages_sorted) == 1
+                else f"pages {', '.join(str(p) for p in pages_sorted)}"
+            )
+        elif locs:
+            # strip verbose line counts → keep "page N" if present
+            simplified = []
+            for loc in locs:
+                m = re.search(r"page\s+(\d+)", loc)
+                simplified.append(f"page {m.group(1)}" if m else loc)
+            entry["location"] = ", ".join(dict.fromkeys(simplified))
+        else:
+            entry["location"] = "document indexé"
+        result.append(entry)
+    return result
 
 
 def format_docs_for_prompt(docs) -> str:

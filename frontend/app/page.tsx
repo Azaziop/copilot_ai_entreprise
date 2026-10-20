@@ -17,7 +17,6 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   route?: string;
-  reasoning?: string[];
   sources?: SourceItem[];
   streaming?: boolean;
 }
@@ -46,6 +45,37 @@ type StreamEvent = {
   session_id?: number;
 };
 
+/** Collapse duplicate filenames into one card (frontend safety net). */
+function dedupeSources(sources: SourceItem[]): SourceItem[] {
+  const map = new Map<string, SourceItem & { pages: string[] }>();
+  for (const s of sources) {
+    const key = s.filename || s.label || "document";
+    const pageMatch = (s.location || "").match(/page[s]?\s+([\d,\s]+)/i);
+    const pagesFromLoc = pageMatch
+      ? pageMatch[1].split(/[,\s]+/).filter(Boolean)
+      : [];
+
+    if (!map.has(key)) {
+      map.set(key, { ...s, pages: [...pagesFromLoc] });
+      continue;
+    }
+    const cur = map.get(key)!;
+    for (const p of pagesFromLoc) {
+      if (!cur.pages.includes(p)) cur.pages.push(p);
+    }
+  }
+  return Array.from(map.values()).map((s) => {
+    const { pages, ...rest } = s;
+    const location =
+      pages.length === 0
+        ? rest.location || "document indexé"
+        : pages.length === 1
+          ? `page ${pages[0]}`
+          : `pages ${pages.join(", ")}`;
+    return { ...rest, location, snippet: undefined };
+  });
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -56,8 +86,10 @@ export default function Home() {
   const [documents, setDocuments] = useState<DocItem[]>([]);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionId, setSessionId] = useState<number | null>(null);
-  const [reasoningOpen, setReasoningOpen] = useState(false);
   const [sideTab, setSideTab] = useState<"chats" | "docs">("chats");
+  const [liveReasoning, setLiveReasoning] = useState<string[]>([]);
+  const [showReasoningPanel, setShowReasoningPanel] = useState(false);
+  const hideReasoningTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const apiUrl = useMemo(
@@ -98,25 +130,18 @@ export default function Home() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  useEffect(() => {
+    return () => {
+      if (hideReasoningTimer.current) clearTimeout(hideReasoningTimer.current);
+    };
+  }, []);
+
   const patchAssistant = (patch: Partial<Message>) => {
     setMessages((prev) => {
       const next = [...prev];
       const last = next[next.length - 1];
       if (!last || last.role !== "assistant") return prev;
       next[next.length - 1] = { ...last, ...patch };
-      return next;
-    });
-  };
-
-  const appendReasoning = (text: string) => {
-    setMessages((prev) => {
-      const next = [...prev];
-      const last = next[next.length - 1];
-      if (!last || last.role !== "assistant") return prev;
-      next[next.length - 1] = {
-        ...last,
-        reasoning: [...(last.reasoning || []), text],
-      };
       return next;
     });
   };
@@ -132,6 +157,23 @@ export default function Home() {
       };
       return next;
     });
+  };
+
+  const openReasoningPanel = (text: string) => {
+    if (hideReasoningTimer.current) {
+      clearTimeout(hideReasoningTimer.current);
+      hideReasoningTimer.current = null;
+    }
+    setShowReasoningPanel(true);
+    setLiveReasoning((prev) => [...prev, text]);
+  };
+
+  const closeReasoningPanel = () => {
+    if (hideReasoningTimer.current) clearTimeout(hideReasoningTimer.current);
+    hideReasoningTimer.current = setTimeout(() => {
+      setShowReasoningPanel(false);
+      setLiveReasoning([]);
+    }, 450);
   };
 
   const startNewChat = async () => {
@@ -153,6 +195,8 @@ export default function Home() {
     }
     setMessages([]);
     setInput("");
+    setShowReasoningPanel(false);
+    setLiveReasoning([]);
     setSideTab("chats");
   };
 
@@ -172,7 +216,8 @@ export default function Home() {
         });
       }
       setMessages(restored);
-      setReasoningOpen(false);
+      setShowReasoningPanel(false);
+      setLiveReasoning([]);
     } catch {
       /* ignore */
     }
@@ -185,14 +230,14 @@ export default function Home() {
     const question = input.trim();
     setInput("");
     setLoading(true);
-    setReasoningOpen(true);
+    setLiveReasoning([]);
+    setShowReasoningPanel(false);
     setMessages((prev) => [
       ...prev,
       { role: "user", content: question },
       {
         role: "assistant",
         content: "",
-        reasoning: [],
         sources: [],
         streaming: true,
       },
@@ -215,6 +260,7 @@ export default function Home() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let answerStarted = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -240,21 +286,28 @@ export default function Home() {
           if (event.type === "session" && event.session_id) {
             setSessionId(event.session_id);
           } else if (event.type === "reasoning" && event.text) {
-            appendReasoning(event.text);
+            if (!answerStarted) openReasoningPanel(event.text);
           } else if (event.type === "route" && event.route) {
             patchAssistant({ route: event.route });
           } else if (event.type === "sources" && event.sources) {
-            patchAssistant({ sources: event.sources });
+            patchAssistant({ sources: dedupeSources(event.sources) });
           } else if (event.type === "token" && event.text) {
+            if (!answerStarted) {
+              answerStarted = true;
+              closeReasoningPanel();
+            }
             appendToken(event.text);
           } else if (event.type === "done") {
             patchAssistant({
               ...(event.answer != null ? { content: event.answer } : {}),
               ...(event.route ? { route: event.route } : {}),
-              ...(event.sources ? { sources: event.sources } : {}),
+              ...(event.sources
+                ? { sources: dedupeSources(event.sources) }
+                : {}),
               streaming: false,
             });
             if (event.session_id) setSessionId(event.session_id);
+            closeReasoningPanel();
             loadSessions();
           } else if (event.type === "error") {
             throw new Error(event.text || "Erreur de stream");
@@ -263,6 +316,7 @@ export default function Home() {
       }
 
       patchAssistant({ streaming: false });
+      closeReasoningPanel();
     } catch (error) {
       const detail =
         error instanceof Error
@@ -272,6 +326,7 @@ export default function Home() {
         content: `**Erreur** — ${detail}`,
         streaming: false,
       });
+      closeReasoningPanel();
     } finally {
       setLoading(false);
     }
@@ -317,7 +372,13 @@ export default function Home() {
 
   return (
     <main className="min-h-screen px-0 py-0 md:px-4 md:py-4">
-      <div className="mx-auto grid h-screen max-w-[1440px] overflow-hidden border-0 bg-[var(--panel)] shadow-[var(--shadow)] md:h-[calc(100vh-2rem)] md:grid-cols-[300px_1fr] md:rounded-2xl md:border md:border-[var(--line)]">
+      <div
+        className={`mx-auto grid h-screen max-w-[1440px] overflow-hidden border-0 bg-[var(--panel)] shadow-[var(--shadow)] transition-[grid-template-columns] duration-300 md:h-[calc(100vh-2rem)] md:rounded-2xl md:border md:border-[var(--line)] ${
+          showReasoningPanel
+            ? "md:grid-cols-[280px_1fr_300px]"
+            : "md:grid-cols-[280px_1fr]"
+        }`}
+      >
         <aside className="flex flex-col border-b border-[var(--line)] bg-[var(--bg-elevated)] md:border-b-0 md:border-r">
           <div className="animate-rise border-b border-[var(--line)] px-5 py-5">
             <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[var(--accent-strong)]">
@@ -329,9 +390,6 @@ export default function Home() {
             >
               Copilot
             </h1>
-            <p className="mt-2 text-[13px] leading-relaxed text-[var(--muted)]">
-              Blanc & bleu ciel — réponses sourcées, mémoire de conversation.
-            </p>
             <button
               type="button"
               onClick={startNewChat}
@@ -374,7 +432,7 @@ export default function Home() {
               <ul className="space-y-1">
                 {sessions.length === 0 && (
                   <li className="px-2 text-xs text-[var(--muted)]">
-                    Aucune conversation. Démarrez-en une.
+                    Aucune conversation.
                   </li>
                 )}
                 {sessions.map((s) => (
@@ -385,7 +443,7 @@ export default function Home() {
                       className={`w-full rounded-xl border px-3 py-2.5 text-left transition ${
                         sessionId === s.id
                           ? "border-[var(--accent)] bg-white shadow-sm"
-                          : "border-transparent bg-transparent hover:border-[var(--line)] hover:bg-white/80"
+                          : "border-transparent hover:border-[var(--line)] hover:bg-white/80"
                       }`}
                     >
                       <div className="truncate text-sm font-medium text-[var(--ink)]">
@@ -401,20 +459,16 @@ export default function Home() {
                   </li>
                 ))}
               </ul>
-              <p className="mt-4 px-1 text-[11px] leading-relaxed text-[var(--muted)]">
-                Mémoire : les 6 derniers échanges de la conversation active sont
-                renvoyés au modèle.
-              </p>
             </div>
           ) : (
             <div className="flex min-h-0 flex-1 flex-col">
-              <form onSubmit={handleUpload} className="space-y-3 border-b border-[var(--line)] px-4 py-3">
+              <form
+                onSubmit={handleUpload}
+                className="space-y-3 border-b border-[var(--line)] px-4 py-3"
+              >
                 <label className="flex cursor-pointer flex-col gap-1 rounded-xl border border-dashed border-[var(--line)] bg-white px-3 py-3 transition hover:border-[var(--accent)]">
                   <span className="truncate text-sm font-medium text-[var(--ink)]">
                     {file ? file.name : "Importer PDF, TXT, MD, CSV, XLSX"}
-                  </span>
-                  <span className="text-[11px] text-[var(--muted)]">
-                    Indexation Chroma · citations fichier / page
                   </span>
                   <input
                     type="file"
@@ -450,12 +504,6 @@ export default function Home() {
                       className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-xs"
                     >
                       <div className="font-medium text-[var(--ink)]">{doc.filename}</div>
-                      <div className="mt-0.5 text-[var(--muted)]">
-                        {(doc.file_type || "file").toUpperCase()}
-                        {doc.uploaded_at
-                          ? ` · ${new Date(doc.uploaded_at).toLocaleString("fr-FR")}`
-                          : ""}
-                      </div>
                     </li>
                   ))}
                 </ul>
@@ -474,9 +522,7 @@ export default function Home() {
                 Assistant
               </p>
               <p className="text-[11px] text-[var(--muted)]">
-                {sessionId
-                  ? `Conversation #${sessionId} · mémoire active`
-                  : "Nouvelle session · mémoire au premier message"}
+                {sessionId ? `Conversation #${sessionId}` : "Nouvelle session"}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -502,8 +548,9 @@ export default function Home() {
                   Comment puis-je vous aider ?
                 </h2>
                 <p className="mt-3 max-w-lg text-sm leading-relaxed text-[var(--muted)]">
-                  Posez une question. L’agent stream son raisonnement, répond, puis
-                  n’affiche que les sources réellement utilisées.
+                  Posez une question sur vos documents. Le raisonnement s’affiche
+                  à droite pendant l’analyse, puis la réponse avec les sources
+                  utilisées.
                 </p>
                 <div className="mt-6 flex flex-wrap gap-2">
                   {suggestions.map((s) => (
@@ -538,46 +585,6 @@ export default function Home() {
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {(msg.reasoning?.length || 0) > 0 && (
-                        <div className="overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--reason-bg)]">
-                          <button
-                            type="button"
-                            onClick={() => setReasoningOpen((v) => !v)}
-                            className="flex w-full items-center justify-between px-3.5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--muted)]"
-                          >
-                            <span>Raisonnement de l’agent</span>
-                            <span>{reasoningOpen ? "Masquer" : "Afficher"}</span>
-                          </button>
-                          {reasoningOpen && (
-                            <ol className="reason-scroll max-h-44 space-y-2 overflow-y-auto border-t border-[var(--line)] px-3.5 py-3">
-                              {msg.reasoning!.map((step, i) => (
-                                <li
-                                  key={`${index}-r-${i}`}
-                                  className="flex gap-2.5 text-[13px] leading-snug text-[var(--ink)]"
-                                >
-                                  <span className="mt-0.5 shrink-0 font-mono text-[10px] font-bold text-[var(--accent-strong)]">
-                                    {String(i + 1).padStart(2, "0")}
-                                  </span>
-                                  <span className="md-body !text-[13px]">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                      {step}
-                                    </ReactMarkdown>
-                                  </span>
-                                </li>
-                              ))}
-                              {msg.streaming && !msg.content && (
-                                <li className="flex items-center gap-1.5 text-xs text-[var(--muted)]">
-                                  <span className="thinking-dot" />
-                                  <span className="thinking-dot" />
-                                  <span className="thinking-dot" />
-                                  <span className="ml-1">Réflexion en cours…</span>
-                                </li>
-                              )}
-                            </ol>
-                          )}
-                        </div>
-                      )}
-
                       {(msg.content || msg.streaming) && (
                         <div
                           className={`rounded-2xl border border-[var(--line)] bg-white px-4 py-3.5 ${
@@ -589,7 +596,7 @@ export default function Home() {
                           </div>
                           <div className="md-body">
                             <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {msg.content || "_…_"}
+                              {msg.content || "_Génération…_"}
                             </ReactMarkdown>
                           </div>
                         </div>
@@ -598,7 +605,8 @@ export default function Home() {
                       {!msg.streaming && (msg.sources?.length || 0) > 0 && (
                         <div className="rounded-2xl border border-[var(--line)] bg-white px-4 py-3">
                           <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--muted)]">
-                            Sources utilisées ({msg.sources!.length})
+                            Source{msg.sources!.length > 1 ? "s" : ""} utilisée
+                            {msg.sources!.length > 1 ? "s" : ""}
                           </p>
                           <ul className="mt-2 space-y-2">
                             {msg.sources!.map((s, i) => (
@@ -619,7 +627,7 @@ export default function Home() {
                                   </span>
                                 </div>
                                 <p className="mt-0.5 text-xs text-[var(--muted)]">
-                                  {s.location || s.label || "Source"}
+                                  {s.location || "document indexé"}
                                 </p>
                               </li>
                             ))}
@@ -656,6 +664,36 @@ export default function Home() {
             </div>
           </form>
         </section>
+
+        {showReasoningPanel && (
+          <aside className="animate-rise flex min-h-0 flex-col border-t border-[var(--line)] bg-[var(--reason-bg)] md:border-t-0 md:border-l">
+            <div className="flex items-center justify-between border-b border-[var(--line)] px-4 py-3">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--accent-strong)]">
+                  Raisonnement
+                </p>
+                <p className="text-[11px] text-[var(--muted)]">En cours…</p>
+              </div>
+              <span className="flex items-center gap-1">
+                <span className="thinking-dot" />
+                <span className="thinking-dot" />
+                <span className="thinking-dot" />
+              </span>
+            </div>
+            <ol className="reason-scroll min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
+              {liveReasoning.map((step, i) => (
+                <li key={`lr-${i}`} className="flex gap-2.5 text-[13px] leading-snug">
+                  <span className="mt-0.5 shrink-0 font-mono text-[10px] font-bold text-[var(--accent-strong)]">
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                  <span className="md-body !text-[13px] text-[var(--ink)]">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{step}</ReactMarkdown>
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </aside>
+        )}
       </div>
     </main>
   );

@@ -127,20 +127,7 @@ Question: {input}"""
             yield {"type": "token", "text": chunk}
 
         full = "".join(answer_parts).strip()
-        final_sources = select_cited_sources(full, sources, max_n=3)
-        if final_sources:
-            listed = ", ".join(
-                f"{s['filename']} ({s['location']})" for s in final_sources
-            )
-            yield {
-                "type": "reasoning",
-                "text": f"Sources utilisées pour la réponse : {listed}.",
-            }
-        else:
-            yield {
-                "type": "reasoning",
-                "text": "Aucune source documentaire retenue pour cette réponse.",
-            }
+        final_sources = select_cited_sources(full, sources, max_n=2)
         yield {"type": "sources", "sources": final_sources}
 
     elif decision == "TOOL":
