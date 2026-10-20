@@ -5,11 +5,8 @@ on:
     paths:
       - "terraform/**"
       - ".github/workflows/terraform.yaml"
-  push:
-    branches: [main, master]
-    paths:
-      - "terraform/**"
-      - ".github/workflows/terraform.yaml"
+  # Push plan is disabled until a remote backend exists (local state only today).
+  # Re-enable push after configuring backend.tf + migrating state.
   workflow_dispatch:
     inputs:
       apply:
@@ -24,10 +21,6 @@ permissions:
 
 env:
   TF_WORKING_DIR: terraform
-  ARM_USE_OIDC: true
-  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
 jobs:
   plan:
@@ -37,8 +30,22 @@ jobs:
     defaults:
       run:
         working-directory: ${{ env.TF_WORKING_DIR }}
+    env:
+      # Must be job-level so Environment secrets (azure-prod) resolve
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check Azure OIDC secrets
+        run: |
+          missing=0
+          [ -n "$ARM_CLIENT_ID" ] || { echo "AZURE_CLIENT_ID missing"; missing=1; }
+          [ -n "$ARM_TENANT_ID" ] || { echo "AZURE_TENANT_ID missing"; missing=1; }
+          [ -n "$ARM_SUBSCRIPTION_ID" ] || { echo "AZURE_SUBSCRIPTION_ID missing"; missing=1; }
+          exit "$missing"
 
       - name: Azure Login (OIDC)
         uses: azure/login@v2
@@ -50,6 +57,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.8"
+          terraform_wrapper: false
 
       - name: Terraform fmt
         run: terraform fmt -check -recursive
@@ -91,14 +99,17 @@ jobs:
   apply:
     name: Terraform apply
     needs: plan
-    if: |
-      (github.event_name == 'workflow_dispatch' && inputs.apply == true) ||
-      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && vars.TF_AUTO_APPLY == 'true')
+    if: github.event_name == 'workflow_dispatch' && inputs.apply == true
     runs-on: ubuntu-latest
     environment: azure-prod
     defaults:
       run:
         working-directory: ${{ env.TF_WORKING_DIR }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -112,6 +123,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.8"
+          terraform_wrapper: false
 
       - name: Terraform init
         run: terraform init -input=false

@@ -59,7 +59,7 @@ terraform plan
 terraform apply
 ```
 
-Optional remote state: copy `backend.tf.example` → `backend.tf` after creating a storage account.
+**Remote state (required before CI Terraform):** copy `backend.tf.example` → `backend.tf` after creating a storage account, migrate local state, then re-enable the `push` trigger in `.github/workflows/terraform.yaml`. Until then, infra is managed locally (`terraform apply`); the GitHub Terraform workflow is `workflow_dispatch` / PR only so it does not fight an empty remote state.
 
 Outputs:
 
