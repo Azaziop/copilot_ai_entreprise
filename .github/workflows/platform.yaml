@@ -1,0 +1,99 @@
+name: Platform bootstrap
+
+# Ensures AKS is reachable, Ingress NGINX is installed, secrets + Argo Application exist.
+# Runs after infra exists; safe to re-run (idempotent).
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Terraform Azure"]
+    types: [completed]
+  push:
+    branches: [main, master]
+    paths:
+      - "argocd/**"
+      - ".github/workflows/platform.yaml"
+      - "k8s/overlays/azure/ingress.yaml"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AKS_RG: rg-entcopilot
+  AKS_NAME: aks-entcopilot
+  APP_NS: enterprise-copilot
+
+jobs:
+  bootstrap:
+    name: Secrets / Ingress / Argo Application
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: azure-prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: AKS credentials
+        run: az aks get-credentials -g "$AKS_RG" -n "$AKS_NAME" --overwrite-existing
+
+      - name: Install kubectl / helm
+        uses: azure/setup-kubectl@v4
+      - uses: azure/setup-helm@v4
+
+      - name: Ensure ingress-nginx
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx --create-namespace \
+            --set controller.service.type=LoadBalancer \
+            --wait --timeout 10m
+
+      - name: Namespace + rag-secrets from GitHub secrets
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY }}
+        run: |
+          kubectl create namespace "$APP_NS" --dry-run=client -o yaml | kubectl apply -f -
+          if [ -z "${OPENROUTER_API_KEY:-}" ] || [ -z "${LANGCHAIN_API_KEY:-}" ]; then
+            echo "OPENROUTER_API_KEY / LANGCHAIN_API_KEY missing in environment azure-prod — skipping secret sync"
+            exit 0
+          fi
+          kubectl -n "$APP_NS" create secret generic rag-secrets \
+            --from-literal=OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
+            --from-literal=LANGCHAIN_API_KEY="$LANGCHAIN_API_KEY" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply Argo CD Application
+        run: kubectl apply -f argocd/application.yaml
+
+      - name: Argo server ClusterIP (save public IP quota)
+        run: |
+          if kubectl -n argocd get svc argo-cd-argocd-server >/dev/null 2>&1; then
+            kubectl -n argocd patch svc argo-cd-argocd-server --type=merge \
+              --patch-file argocd/patch-server-clusterip.yaml || true
+          fi
+
+      - name: Wait Ingress IP
+        id: ingress
+        run: |
+          chmod +x scripts/wait_ingress_ip.sh
+          IP=$(scripts/wait_ingress_ip.sh)
+          echo "ip=$IP" >> "$GITHUB_OUTPUT"
+          echo "Ingress IP: $IP"
+
+      - name: Summary
+        run: |
+          kubectl -n argocd get applications || true
+          kubectl -n "$APP_NS" get ingress,svc,pods || true
+          echo "Public app URL (after frontend rebuild): http://${{ steps.ingress.outputs.ip }}/"
+          echo "Public API URL: http://${{ steps.ingress.outputs.ip }}/api"

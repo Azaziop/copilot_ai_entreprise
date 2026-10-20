@@ -97,6 +97,5 @@ resource "helm_release" "argocd" {
   ]
 }
 
-# Argo CD Application is applied AFTER the cluster exists (kubernetes_manifest
-# cannot plan against a cluster that does not exist yet).
-# See: kubectl apply -f ../argocd/application.yaml
+# Argo CD Application is applied by GitHub Actions (platform.yaml) or Ansible
+# after the cluster exists (kubernetes_manifest cannot plan on first create).

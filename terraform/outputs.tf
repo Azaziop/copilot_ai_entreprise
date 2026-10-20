@@ -33,3 +33,7 @@ output "kube_config_raw" {
 output "argocd_namespace" {
   value = var.argocd_enabled ? "argocd" : null
 }
+
+output "ingress_nginx_namespace" {
+  value = var.ingress_nginx_enabled ? "ingress-nginx" : null
+}

@@ -14,6 +14,7 @@ namespace: enterprise-copilot
 
 resources:
   - ../../base
+  - ingress.yaml
 
 images:
   - name: copilot-backend
@@ -24,7 +25,7 @@ images:
     newTag: {tag}
 
 patches:
-  - path: patch-services-lb.yaml
+  - path: patch-services-clusterip.yaml
   - path: patch-pull-policy.yaml
   - path: patch-configmap.yaml
 """

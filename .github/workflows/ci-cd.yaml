@@ -7,6 +7,7 @@ on:
       - "terraform/**"
       - "docs/**"
       - "**/*.md"
+      - "ansible/**"
   workflow_dispatch:
     inputs:
       image_tag:
@@ -21,6 +22,8 @@ permissions:
 env:
   BACKEND_IMAGE: copilot-backend
   FRONTEND_IMAGE: copilot-frontend
+  AKS_RG: rg-entcopilot
+  AKS_NAME: aks-entcopilot
 
 jobs:
   build-push:
@@ -30,6 +33,7 @@ jobs:
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
       acr_login_server: ${{ steps.acr.outputs.login_server }}
+      public_api_url: ${{ steps.apiurl.outputs.url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,6 +46,11 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - uses: azure/setup-kubectl@v4
+
+      - name: AKS credentials
+        run: az aks get-credentials -g "$AKS_RG" -n "$AKS_NAME" --overwrite-existing
+
       - name: Resolve ACR login server
         id: acr
         run: |
@@ -50,6 +59,29 @@ jobs:
           else
             SERVER=$(az acr list --query "[0].loginServer" -o tsv)
             echo "login_server=$SERVER" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve PUBLIC_API_URL (Ingress /api)
+        id: apiurl
+        run: |
+          if [ -n "${{ vars.PUBLIC_API_URL }}" ]; then
+            echo "url=${{ vars.PUBLIC_API_URL }}" >> "$GITHUB_OUTPUT"
+            echo "Using repo variable PUBLIC_API_URL"
+            exit 0
+          fi
+          chmod +x scripts/wait_ingress_ip.sh
+          # Ensure controller exists (idempotent)
+          if ! kubectl -n ingress-nginx get svc ingress-nginx-controller >/dev/null 2>&1; then
+            echo "ingress-nginx missing — install via Platform bootstrap workflow first"
+            echo "url=http://PENDING_INGRESS_IP/api" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          IP=$(INGRESS_WAIT_TIMEOUT=180 scripts/wait_ingress_ip.sh || true)
+          if [ -n "${IP:-}" ]; then
+            echo "url=http://${IP}/api" >> "$GITHUB_OUTPUT"
+            echo "Resolved Ingress API URL: http://${IP}/api"
+          else
+            echo "url=http://PENDING_INGRESS_IP/api" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Image tag
@@ -84,7 +116,7 @@ jobs:
           file: ./frontend/Dockerfile
           push: true
           build-args: |
-            NEXT_PUBLIC_API_URL=${{ vars.PUBLIC_API_URL || 'http://PENDING_BACKEND_LB_IP' }}
+            NEXT_PUBLIC_API_URL=${{ steps.apiurl.outputs.url }}
           tags: |
             ${{ steps.acr.outputs.login_server }}/${{ env.FRONTEND_IMAGE }}:${{ steps.meta.outputs.tag }}
             ${{ steps.acr.outputs.login_server }}/${{ env.FRONTEND_IMAGE }}:latest
@@ -95,11 +127,32 @@ jobs:
             --acr "${{ steps.acr.outputs.login_server }}" \
             --tag "${{ steps.meta.outputs.tag }}"
 
+      - name: Patch configmap API URL in GitOps
+        if: ${{ !contains(steps.apiurl.outputs.url, 'PENDING') }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          url = os.environ["API_URL"]
+          path = Path("k8s/overlays/azure/patch-configmap.yaml")
+          text = path.read_text(encoding="utf-8")
+          lines = []
+          for line in text.splitlines():
+              if line.strip().startswith("NEXT_PUBLIC_API_URL:"):
+                  lines.append(f'  NEXT_PUBLIC_API_URL: "{url}"')
+              else:
+                  lines.append(line)
+          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print(f"configmap -> {url}")
+          PY
+        env:
+          API_URL: ${{ steps.apiurl.outputs.url }}
+
       - name: Commit GitOps tag bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add k8s/overlays/azure/kustomization.yaml
+          git add k8s/overlays/azure/kustomization.yaml k8s/overlays/azure/patch-configmap.yaml
           if git diff --staged --quiet; then
             echo "No kustomize changes"
             exit 0

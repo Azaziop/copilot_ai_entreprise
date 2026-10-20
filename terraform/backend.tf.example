@@ -1,11 +1,21 @@
-# Copy to backend.tf after creating the storage account, then re-init:
-#   terraform init -migrate-state
+# Remote state (required for GitHub Actions terraform apply).
 #
-# terraform {
-#   backend "azurerm" {
-#     resource_group_name  = "rg-entcopilot-tfstate"
-#     storage_account_name = "entcopilottfstate"
-#     container_name       = "tfstate"
-#     key                  = "enterprise-copilot.tfstate"
-#   }
-# }
+# 1) Create once (Azure CLI):
+#    az group create -n rg-entcopilot-tfstate -l francecentral
+#    az storage account create -n entcopilottfstate -g rg-entcopilot-tfstate -l francecentral --sku Standard_LRS
+#    az storage container create -n tfstate --account-name entcopilottfstate
+#
+# 2) Copy this file to backend.tf (gitignored) OR pass -backend-config in CI.
+#
+# 3) Migrate local state:
+#    terraform init -migrate-state
+#
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "rg-entcopilot-tfstate"
+    storage_account_name = "entcopilottfstate"
+    container_name       = "tfstate"
+    key                  = "enterprise-copilot.tfstate"
+    use_oidc             = true
+  }
+}

@@ -5,14 +5,17 @@ on:
     paths:
       - "terraform/**"
       - ".github/workflows/terraform.yaml"
-  # Push plan is disabled until a remote backend exists (local state only today).
-  # Re-enable push after configuring backend.tf + migrating state.
+  push:
+    branches: [main, master]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yaml"
   workflow_dispatch:
     inputs:
       apply:
         description: "Run terraform apply"
         type: boolean
-        default: false
+        default: true
 
 permissions:
   id-token: write
@@ -31,7 +34,6 @@ jobs:
       run:
         working-directory: ${{ env.TF_WORKING_DIR }}
     env:
-      # Must be job-level so Environment secrets (azure-prod) resolve
       ARM_USE_OIDC: true
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -62,8 +64,20 @@ jobs:
       - name: Terraform fmt
         run: terraform fmt -check -recursive
 
-      - name: Terraform init
-        run: terraform init -input=false
+      - name: Terraform init (local or remote backend)
+        run: |
+          if [ -n "${{ vars.TF_STATE_STORAGE_ACCOUNT }}" ]; then
+            printf '%s\n' 'terraform {' '  backend "azurerm" {}' '}' > backend.tf
+            terraform init -input=false \
+              -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP || 'rg-entcopilot-tfstate' }}" \
+              -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+              -backend-config="container_name=${{ vars.TF_STATE_CONTAINER || 'tfstate' }}" \
+              -backend-config="key=${{ vars.TF_STATE_KEY || 'enterprise-copilot.tfstate' }}" \
+              -backend-config="use_oidc=true"
+          else
+            echo "No TF_STATE_STORAGE_ACCOUNT — local backend (plan may diverge from real Azure)"
+            terraform init -input=false
+          fi
 
       - name: Terraform validate
         run: terraform validate
@@ -80,6 +94,12 @@ jobs:
           export TF_VAR_gitops_repo_url="$REPO_URL"
           terraform plan -input=false -out=tfplan
           terraform show -no-color tfplan > plan.txt
+
+      - name: Upload plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
 
       - name: Comment plan on PR
         if: github.event_name == 'pull_request'
@@ -99,7 +119,9 @@ jobs:
   apply:
     name: Terraform apply
     needs: plan
-    if: github.event_name == 'workflow_dispatch' && inputs.apply == true
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.apply == true) ||
+      (github.event_name == 'push' && vars.TF_AUTO_APPLY == 'true' && vars.TF_STATE_STORAGE_ACCOUNT != '')
     runs-on: ubuntu-latest
     environment: azure-prod
     defaults:
@@ -125,8 +147,15 @@ jobs:
           terraform_version: "1.9.8"
           terraform_wrapper: false
 
-      - name: Terraform init
-        run: terraform init -input=false
+      - name: Terraform init (remote)
+        run: |
+          printf '%s\n' 'terraform {' '  backend "azurerm" {}' '}' > backend.tf
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP || 'rg-entcopilot-tfstate' }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TF_STATE_CONTAINER || 'tfstate' }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY || 'enterprise-copilot.tfstate' }}" \
+            -backend-config="use_oidc=true"
 
       - name: Terraform apply
         env:

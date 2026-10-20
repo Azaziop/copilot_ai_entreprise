@@ -2,13 +2,16 @@
 
 ## Architecture
 
-1. **Terraform** creates Resource Group, ACR, AKS, AcrPull role, and installs **Argo CD** (Helm).
-2. **GitHub Actions** builds/pushes Docker images to ACR and bumps tags in `k8s/overlays/azure`.
-3. **Argo CD** syncs `k8s/overlays/azure` into the `enterprise-copilot` namespace.
+See **[FULL_AUTOMATION.md](./FULL_AUTOMATION.md)** for the end-to-end automated pipeline.
+
+1. **Terraform** — RG, ACR, AKS, AcrPull, Argo CD, Ingress NGINX  
+2. **GHA Platform** — secrets, Ingress, Argo Application  
+3. **GHA CI** — build/push ACR, auto `PUBLIC_API_URL` from Ingress, GitOps tag bump  
+4. **Argo CD** — sync `k8s/overlays/azure` → AKS  
 
 ```text
-GitHub push → Actions (build/push ACR + tag bump) → Argo CD → AKS
-                 ↘ Terraform (infra) ↗
+git push → Platform + Build/Push → Argo CD → AKS (Ingress :80)
+        ↘ Terraform apply (remote state) ↗
 ```
 
 ## Prerequisites
@@ -33,17 +36,20 @@ Grant the app roles:
 | `AZURE_CLIENT_ID` | App registration client ID |
 | `AZURE_TENANT_ID` | Directory (tenant) ID |
 | `AZURE_SUBSCRIPTION_ID` | Subscription ID |
+| `OPENROUTER_API_KEY` | Synced to K8s `rag-secrets` by Platform workflow |
+| `LANGCHAIN_API_KEY` | Synced to K8s `rag-secrets` by Platform workflow |
 
-Put these on the **`azure-prod`** environment (Settings → Environments → azure-prod → Environment secrets), not only as repo variables.
+Put these on the **`azure-prod`** environment (Settings → Environments → azure-prod → Environment secrets).
 
 ### GitHub variables
 
 | Variable | Description |
 |----------|-------------|
 | `GITOPS_REPO_URL` | e.g. `https://github.com/OWNER/copilot_ai.git` |
-| `ACR_LOGIN_SERVER` | Set after first Terraform apply (e.g. `entcopilotacrxxxxxx.azurecr.io`) |
-| `PUBLIC_API_URL` | Public backend URL for Next.js build (`http://<backend-lb-ip>`) |
-| `TF_AUTO_APPLY` | `true` to auto-apply Terraform on push to `main` (optional) |
+| `ACR_LOGIN_SERVER` | e.g. `entcopilotacrxxxxxx.azurecr.io` |
+| `PUBLIC_API_URL` | Optional override; else CI uses `http://<INGRESS_IP>/api` |
+| `TF_STATE_STORAGE_ACCOUNT` | Enable remote Terraform state + CI apply |
+| `TF_AUTO_APPLY` | `true` to auto-apply Terraform on push to `main` |
 
 Create GitHub Environment **`azure-prod`** (used by apply / CI jobs).
 

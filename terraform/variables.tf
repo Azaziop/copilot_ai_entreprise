@@ -34,6 +34,18 @@ variable "argocd_enabled" {
   default     = true
 }
 
+variable "ingress_nginx_enabled" {
+  description = "Install Ingress NGINX (single public IP for the app)"
+  type        = bool
+  default     = true
+}
+
+variable "ingress_nginx_chart_version" {
+  description = "ingress-nginx Helm chart version"
+  type        = string
+  default     = "4.11.3"
+}
+
 variable "argocd_chart_version" {
   description = "Argo CD Helm chart version"
   type        = string
