@@ -81,8 +81,10 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [file, setFile] = useState<File | null>(null);
-  const [uploadStatus, setUploadStatus] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [toast, setToast] = useState<{ kind: "ok" | "err"; text: string } | null>(
+    null
+  );
   const [documents, setDocuments] = useState<DocItem[]>([]);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionId, setSessionId] = useState<number | null>(null);
@@ -135,6 +137,16 @@ export default function Home() {
       if (hideReasoningTimer.current) clearTimeout(hideReasoningTimer.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3800);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const showToast = (kind: "ok" | "err", text: string) => {
+    setToast({ kind, text });
+  };
 
   const patchAssistant = (patch: Partial<Message>) => {
     setMessages((prev) => {
@@ -326,6 +338,7 @@ export default function Home() {
         content: `**Erreur** — ${detail}`,
         streaming: false,
       });
+      showToast("err", detail);
       closeReasoningPanel();
     } finally {
       setLoading(false);
@@ -339,7 +352,7 @@ export default function Home() {
     const formData = new FormData();
     formData.append("file", file);
     setUploading(true);
-    setUploadStatus("Indexation en cours…");
+    showToast("ok", "Indexation en cours…");
 
     try {
       const res = await fetch(`${apiUrl}/upload`, {
@@ -350,28 +363,34 @@ export default function Home() {
       if (!res.ok) {
         throw new Error(data.detail || "Échec de l'upload");
       }
-      setUploadStatus(`Document indexé : ${data.filename}`);
       setFile(null);
       await loadDocuments();
+      showToast("ok", `Document indexé : ${data.filename}`);
     } catch (error) {
       const detail =
         error instanceof Error ? error.message : "Erreur réseau lors de l'upload.";
-      setUploadStatus(detail);
+      showToast("err", detail);
     } finally {
       setUploading(false);
     }
   };
 
-  const suggestions = [
-    "Capitaux propres OCP en 2023 ?",
-    "Compétences du CV Zaoui Anass",
-    "Politique de congés AlphaCorp",
-  ];
-
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
 
   return (
     <main className="min-h-screen px-0 py-0 md:px-4 md:py-4">
+      {toast && (
+        <div
+          className={`fixed right-4 top-4 z-50 max-w-sm animate-rise rounded-xl border px-4 py-3 text-sm shadow-[var(--shadow)] ${
+            toast.kind === "ok"
+              ? "border-[var(--line)] bg-white text-[var(--ink)]"
+              : "border-red-200 bg-white text-red-700"
+          }`}
+          role="status"
+        >
+          {toast.text}
+        </div>
+      )}
       <div
         className={`mx-auto grid h-screen max-w-[1440px] overflow-hidden border-0 bg-[var(--panel)] shadow-[var(--shadow)] transition-[grid-template-columns] duration-300 md:h-[calc(100vh-2rem)] md:rounded-2xl md:border md:border-[var(--line)] ${
           showReasoningPanel
@@ -484,11 +503,6 @@ export default function Home() {
                 >
                   {uploading ? "Indexation…" : "Indexer"}
                 </button>
-                {uploadStatus && (
-                  <p className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-xs text-[var(--muted)]">
-                    {uploadStatus}
-                  </p>
-                )}
               </form>
               <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
                 <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--muted)]">
@@ -525,17 +539,11 @@ export default function Home() {
                 {sessionId ? `Conversation #${sessionId}` : "Nouvelle session"}
               </p>
             </div>
-            <div className="flex items-center gap-2">
-              {lastAssistant?.route && (
-                <span className="rounded-lg border border-[var(--line)] bg-[var(--accent-soft)] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[var(--accent-strong)]">
-                  {lastAssistant.route}
-                </span>
-              )}
-              <span className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--line)] bg-white px-2.5 py-1 text-[11px] font-medium text-[var(--muted)]">
-                <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
-                En ligne
+            {lastAssistant?.route && (
+              <span className="rounded-lg border border-[var(--line)] bg-[var(--accent-soft)] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[var(--accent-strong)]">
+                {lastAssistant.route}
               </span>
-            </div>
+            )}
           </header>
 
           <div className="flex-1 space-y-5 overflow-y-auto px-4 py-5 md:px-8">
@@ -552,18 +560,6 @@ export default function Home() {
                   à droite pendant l’analyse, puis la réponse avec les sources
                   utilisées.
                 </p>
-                <div className="mt-6 flex flex-wrap gap-2">
-                  {suggestions.map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      onClick={() => setInput(s)}
-                      className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-left text-xs font-medium text-[var(--ink)] transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
-                    >
-                      {s}
-                    </button>
-                  ))}
-                </div>
               </div>
             )}
 

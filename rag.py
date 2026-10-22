@@ -65,6 +65,110 @@ def init_rag():
 vector_store = init_rag()
 retriever = vector_store.as_retriever(search_kwargs={"k": 10})
 
+# Hybrid / BM25 corpus cache
+_bm25_corpus: list[Document] = []
+_bm25_index = None
+_cross_encoder = None
+_cross_encoder_failed = False
+
+# Warm BM25 after vector store init (defined below, called at module end)
+
+
+def _tokenize(text: str) -> list[str]:
+    import re
+
+    return re.findall(r"[a-zA-ZÀ-ÿ0-9]+", (text or "").lower())
+
+
+def _refresh_bm25_corpus() -> None:
+    """Rebuild BM25 from Chroma documents (dense + sparse hybrid)."""
+    global _bm25_corpus, _bm25_index
+    try:
+        from rank_bm25 import BM25Okapi
+
+        raw = vector_store.get(include=["documents", "metadatas"])
+        docs_txt = raw.get("documents") or []
+        metas = raw.get("metadatas") or []
+        corpus: list[Document] = []
+        for i, text in enumerate(docs_txt):
+            if not text:
+                continue
+            meta = metas[i] if i < len(metas) and isinstance(metas[i], dict) else {}
+            corpus.append(Document(page_content=text, metadata=dict(meta)))
+        if not corpus:
+            _bm25_corpus = []
+            _bm25_index = None
+            return
+        _bm25_corpus = corpus
+        _bm25_index = BM25Okapi([_tokenize(d.page_content) for d in corpus])
+    except Exception:
+        _bm25_corpus = []
+        _bm25_index = None
+
+
+def _bm25_search(question: str, top_k: int = 20) -> list[Document]:
+    if _bm25_index is None or not _bm25_corpus:
+        _refresh_bm25_corpus()
+    if _bm25_index is None or not _bm25_corpus:
+        return []
+    scores = _bm25_index.get_scores(_tokenize(question))
+    ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+    return [_bm25_corpus[i] for i in ranked[:top_k] if scores[i] > 0]
+
+
+def _doc_key(doc: Document) -> str:
+    meta = doc.metadata or {}
+    raw = meta.get("source") or meta.get("filename") or "document"
+    page = meta.get("page")
+    content_sig = (doc.page_content or "")[:120]
+    return f"{Path(str(raw)).name}|{page}|{hash(content_sig)}"
+
+
+def _rrf_fuse(
+    rankings: list[list[Document]], k: int = 60, top_n: int = 15
+) -> list[Document]:
+    scores: dict[str, float] = {}
+    by_key: dict[str, Document] = {}
+    for ranking in rankings:
+        for rank, doc in enumerate(ranking):
+            key = _doc_key(doc)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+            by_key[key] = doc
+    ordered = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+    return [by_key[key] for key in ordered[:top_n]]
+
+
+def _rerank(question: str, docs: list[Document], top_n: int = 5) -> list[Document]:
+    """Cross-encoder rerank when available; else lexical overlap fallback."""
+    global _cross_encoder, _cross_encoder_failed
+    if not docs:
+        return []
+
+    use_ce = os.getenv("USE_CROSS_ENCODER", "1").lower() not in {"0", "false", "no"}
+    if use_ce and not _cross_encoder_failed:
+        try:
+            if _cross_encoder is None:
+                from sentence_transformers import CrossEncoder
+
+                _cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            pairs = [[question, d.page_content[:1500]] for d in docs]
+            scores = _cross_encoder.predict(pairs)
+            ranked = sorted(
+                zip(docs, scores), key=lambda x: float(x[1]), reverse=True
+            )
+            return [d for d, _ in ranked[:top_n]]
+        except Exception:
+            _cross_encoder_failed = True
+
+    q_tokens = set(_tokenize(question))
+    scored = []
+    for d in docs:
+        d_tokens = set(_tokenize(d.page_content))
+        overlap = len(q_tokens & d_tokens) / max(1, len(q_tokens))
+        scored.append((overlap, d))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [d for _, d in scored[:top_n]]
+
 
 def _doc_location(meta: dict, line_count: int) -> str:
     if meta.get("row_start") is not None and meta.get("row_end") is not None:
@@ -109,15 +213,19 @@ def _source_from_doc(doc) -> dict:
     }
 
 
-def retrieve_with_sources(question: str, k: int = 8):
-    """Return (documents, source dicts) — one passage per page/file location."""
-    docs = retriever.invoke(question)
-    if k and len(docs) > k:
-        docs = docs[:k]
+def retrieve_with_sources(question: str, k: int = 5):
+    """Hybrid dense+BM25 (RRF) → rerank → dedupe by page. Returns (docs, sources)."""
+    fetch_k = max(20, k * 4)
+    dense = vector_store.similarity_search(question, k=fetch_k)
+    sparse = _bm25_search(question, top_k=fetch_k)
+    fused = _rrf_fuse([dense, sparse], top_n=15) if sparse else dense[:15]
+    if not fused:
+        fused = dense
+    reranked = _rerank(question, fused, top_n=max(k, 5))
 
     deduped_docs = []
     seen_pages = set()
-    for doc in docs:
+    for doc in reranked:
         meta = dict(doc.metadata or {})
         raw_source = meta.get("source") or meta.get("filename") or "document"
         filename = Path(str(raw_source)).name
@@ -126,6 +234,8 @@ def retrieve_with_sources(question: str, k: int = 8):
             continue
         seen_pages.add(key)
         deduped_docs.append(doc)
+        if len(deduped_docs) >= k:
+            break
 
     sources = [_source_from_doc(d) for d in deduped_docs]
     return deduped_docs, sources
@@ -274,3 +384,9 @@ Question: {input}"""
         | StrOutputParser()
     )
     return rag_chain
+
+
+try:
+    _refresh_bm25_corpus()
+except Exception:
+    pass

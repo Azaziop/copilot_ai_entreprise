@@ -16,7 +16,7 @@ from database import (
     ChatSession,
     DocumentRecord,
 )
-from rag import vector_store
+from rag import vector_store, _refresh_bm25_corpus
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from evaluation import evaluate_response
@@ -329,6 +329,10 @@ def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db))
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=120)
         chunks = text_splitter.split_documents(new_docs)
         vector_store.add_documents(chunks)
+        try:
+            _refresh_bm25_corpus()
+        except Exception:
+            pass
 
         file_ext = file.filename.rsplit(".", 1)[-1]
         existing = (

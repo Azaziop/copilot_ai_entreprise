@@ -93,23 +93,26 @@ def stream_chat(
     if decision == "RAG":
         yield {
             "type": "reasoning",
-            "text": "Étape 2/3 — Recherche vectorielle dans le corpus indexé…",
+            "text": "Étape 2/4 — Recherche hybride (dense + BM25) + fusion RRF…",
         }
         docs, sources = retrieve_with_sources(question)
         yield {
             "type": "reasoning",
-            "text": f"{len(docs)} passage(s) unique(s) récupéré(s) (dédupliqués par page).",
+            "text": f"Étape 3/4 — Rerank : {len(docs)} passage(s) retenus (top pertinence).",
         }
 
         yield {
             "type": "reasoning",
-            "text": "Étape 3/3 — Génération grounded (stream) à partir du contexte…",
+            "text": "Étape 4/4 — Génération ancrée (citations fichier / page)…",
         }
 
         template = """Tu es un analyste documentaire senior. Réponds UNIQUEMENT à partir du contexte.
-Si le contexte contient des chiffres, cite-les avec l'unité et l'année.
-Si l'information n'est pas dans le contexte, dis-le clairement sans inventer.
-Réponds en markdown structuré.
+Règles strictes :
+- Interdiction d'inventer : si l'info n'est pas dans le contexte, dis-le clairement.
+- Cite explicitement le document et la page (ex. « d'après X.pdf, page 12 »).
+- Pour les chiffres, indique l'unité et l'année.
+- Réponds en markdown structuré (listes, tableaux si utile).
+- N'utilise pas les labels internes « Passage N » dans la réponse finale.
 {memory}
 Contexte:
 {context}
