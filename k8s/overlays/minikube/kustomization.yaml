@@ -17,4 +17,6 @@ images:
 
 patches:
   - path: patch-services-nodeport.yaml
+  - path: patch-pull-policy.yaml
   - path: patch-configmap.yaml
+
