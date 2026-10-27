@@ -15,6 +15,7 @@ from src.retrieval.filename_scope import (
     doc_filename_from_meta,
     extract_named_filenames,
     filter_items_by_filenames,
+    filter_sources_to_question,
     list_data_dir_filenames,
 )
 from dotenv import load_dotenv
@@ -282,6 +283,9 @@ def retrieve_with_sources(question: str, k: int = 5):
     retrieval is scoped to those files only so unrelated PDFs never appear as sources.
     """
     named = extract_named_filenames(question, known=known_corpus_filenames())
+    # When a file is named, keep more chunks from that file (full CV sections)
+    if named:
+        k = max(k, 8)
     fetch_k = max(20, k * 4)
     # Over-fetch when scoping so post-filter still has enough candidates
     search_k = fetch_k * 3 if named else fetch_k
@@ -313,6 +317,21 @@ def retrieve_with_sources(question: str, k: int = 5):
             break
 
     sources = [_source_from_doc(d) for d in deduped_docs]
+    # Absolute safety: drop unrelated files if the question named one
+    if named:
+        allow = {f.lower() for f in named}
+        pair = [
+            (d, s)
+            for d, s in zip(deduped_docs, sources)
+            if (s.get("filename") or "").lower() in allow
+        ]
+        if pair:
+            deduped_docs, sources = [p[0] for p in pair], [p[1] for p in pair]
+        sources = filter_sources_to_question(question, sources)
+        allow_names = {s.get("filename") for s in sources}
+        deduped_docs = [
+            d for d in deduped_docs if _doc_filename(d) in allow_names
+        ]
     return deduped_docs, sources
 
 
@@ -321,12 +340,18 @@ def select_cited_sources(
     sources: list[dict],
     max_n: int = 2,
     allowed_filenames: list[str] | None = None,
+    question: str | None = None,
 ) -> list[dict]:
     """Keep supporting passages, then collapse to one card per filename."""
     import re
 
     if not answer or not sources:
         return []
+
+    if question:
+        sources = filter_sources_to_question(question, sources)
+        if not sources:
+            return []
 
     if allowed_filenames:
         allow = {f.lower() for f in allowed_filenames}

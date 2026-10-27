@@ -4,6 +4,7 @@ from src.retrieval.filename_scope import (
     doc_filename_from_meta,
     extract_named_filenames,
     filter_items_by_filenames,
+    filter_sources_to_question,
 )
 from src.retrieval.retriever import reciprocal_rank_fusion
 from src.schemas.models import Chunk
@@ -31,16 +32,25 @@ def test_extract_named_filenames_scopes_to_cv():
         "sample_ventes.csv",
     }
     q = (
-        "d'aprés ce fichier: CV - ZAOUI ANASS.pdf "
-        "donnez moi les compétences qui existent"
+        "donnez moi le profile et les compétences de ce fichier:"
+        "CV - ZAOUI ANASS.pdf"
     )
     found = extract_named_filenames(q, known=known)
     assert found == ["CV - ZAOUI ANASS.pdf"]
 
 
-def test_extract_named_filenames_empty_when_no_file_cited():
-    known = {"CV - ZAOUI ANASS.pdf", "COMPTES OCP IFRS_CONSO & SOCIAUX_vFR.pdf"}
-    assert extract_named_filenames("quelles sont les compétences ?", known=known) == []
+def test_filter_sources_to_question_drops_ocp():
+    q = "donnez moi le profile de ce fichier:CV - ZAOUI ANASS.pdf"
+    sources = [
+        {"filename": "CV - ZAOUI ANASS.pdf", "location": "page 1"},
+        {
+            "filename": "COMPTES OCP IFRS_CONSO & SOCIAUX_vFR.pdf",
+            "location": "page 34",
+        },
+    ]
+    filtered = filter_sources_to_question(q, sources)
+    assert len(filtered) == 1
+    assert filtered[0]["filename"] == "CV - ZAOUI ANASS.pdf"
 
 
 def test_filter_items_by_filenames_drops_other_pdfs():

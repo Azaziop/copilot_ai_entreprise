@@ -17,6 +17,7 @@ from rag import (
     retrieve_with_sources,
     select_cited_sources,
 )
+from src.retrieval.filename_scope import filter_sources_to_question
 
 load_dotenv(override=True)
 
@@ -157,7 +158,9 @@ Question: {input}"""
             sources,
             max_n=max_sources,
             allowed_filenames=named_files or None,
+            question=question,
         )
+        final_sources = filter_sources_to_question(question, final_sources)
         yield {"type": "sources", "sources": final_sources}
 
     elif decision == "TOOL":
