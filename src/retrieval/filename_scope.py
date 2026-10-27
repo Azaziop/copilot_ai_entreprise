@@ -1,10 +1,4 @@
-"""Scope retrieval to filenames explicitly named in the user question.
-
-Used when the prompt cites a specific file so unrelated corpus docs are excluded.
-"""
-
 from __future__ import annotations
-
 import os
 import re
 from pathlib import Path
