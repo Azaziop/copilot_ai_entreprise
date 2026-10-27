@@ -1,5 +1,10 @@
 """Unit / integration tests and retrieval regression checks."""
 
+from src.retrieval.filename_scope import (
+    doc_filename_from_meta,
+    extract_named_filenames,
+    filter_items_by_filenames,
+)
 from src.retrieval.retriever import reciprocal_rank_fusion
 from src.schemas.models import Chunk
 
@@ -17,3 +22,36 @@ def test_rrf_merges_rankings():
 def test_chunk_model():
     chunk = Chunk(id="1", document_id="doc", content="hello")
     assert chunk.content == "hello"
+
+
+def test_extract_named_filenames_scopes_to_cv():
+    known = {
+        "CV - ZAOUI ANASS.pdf",
+        "COMPTES OCP IFRS_CONSO & SOCIAUX_vFR.pdf",
+        "sample_ventes.csv",
+    }
+    q = (
+        "d'aprés ce fichier: CV - ZAOUI ANASS.pdf "
+        "donnez moi les compétences qui existent"
+    )
+    found = extract_named_filenames(q, known=known)
+    assert found == ["CV - ZAOUI ANASS.pdf"]
+
+
+def test_extract_named_filenames_empty_when_no_file_cited():
+    known = {"CV - ZAOUI ANASS.pdf", "COMPTES OCP IFRS_CONSO & SOCIAUX_vFR.pdf"}
+    assert extract_named_filenames("quelles sont les compétences ?", known=known) == []
+
+
+def test_filter_items_by_filenames_drops_other_pdfs():
+    items = [
+        {"source": "data/raw/CV - ZAOUI ANASS.pdf"},
+        {"source": "data/raw/COMPTES OCP IFRS_CONSO & SOCIAUX_vFR.pdf"},
+    ]
+    filtered = filter_items_by_filenames(
+        items,
+        ["CV - ZAOUI ANASS.pdf"],
+        filename_of=lambda item: doc_filename_from_meta(item),
+    )
+    assert len(filtered) == 1
+    assert "CV" in filtered[0]["source"]

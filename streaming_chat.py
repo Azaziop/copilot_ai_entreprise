@@ -11,7 +11,12 @@ from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 
 from agents import call_mcp_tool, structured_router
-from rag import format_docs_for_prompt, retrieve_with_sources, select_cited_sources
+from rag import (
+    format_docs_for_prompt,
+    named_files_in_question,
+    retrieve_with_sources,
+    select_cited_sources,
+)
 
 load_dotenv(override=True)
 
@@ -91,9 +96,16 @@ def stream_chat(
     final_sources: list[dict[str, Any]] = []
 
     if decision == "RAG":
+        named_files = named_files_in_question(question)
+        scope_note = (
+            f" Portée fichier(s) : {', '.join(named_files)}."
+            if named_files
+            else ""
+        )
         yield {
             "type": "reasoning",
-            "text": "Étape 2/4 — Recherche hybride (dense + BM25) + fusion RRF…",
+            "text": "Étape 2/4 — Recherche hybride (dense + BM25) + fusion RRF…"
+            + scope_note,
         }
         docs, sources = retrieve_with_sources(question)
         yield {
@@ -106,6 +118,15 @@ def stream_chat(
             "text": "Étape 4/4 — Génération ancrée (citations fichier / page)…",
         }
 
+        scope_rule = ""
+        if named_files:
+            joined = ", ".join(named_files)
+            scope_rule = (
+                f"- L'utilisateur a nommé le(s) fichier(s) suivant(s) : {joined}. "
+                "Appuie-toi UNIQUEMENT sur ce(s) document(s) ; "
+                "n'invente pas de citations vers d'autres fichiers.\n"
+            )
+
         template = """Tu es un analyste documentaire senior. Réponds UNIQUEMENT à partir du contexte.
 Règles strictes :
 - Interdiction d'inventer : si l'info n'est pas dans le contexte, dis-le clairement.
@@ -113,7 +134,7 @@ Règles strictes :
 - Pour les chiffres, indique l'unité et l'année.
 - Réponds en markdown structuré (listes, tableaux si utile).
 - N'utilise pas les labels internes « Passage N » dans la réponse finale.
-{memory}
+""" + scope_rule + """{memory}
 Contexte:
 {context}
 
@@ -130,7 +151,13 @@ Question: {input}"""
             yield {"type": "token", "text": chunk}
 
         full = "".join(answer_parts).strip()
-        final_sources = select_cited_sources(full, sources, max_n=2)
+        max_sources = 1 if len(named_files) == 1 else 2
+        final_sources = select_cited_sources(
+            full,
+            sources,
+            max_n=max_sources,
+            allowed_filenames=named_files or None,
+        )
         yield {"type": "sources", "sources": final_sources}
 
     elif decision == "TOOL":

@@ -11,6 +11,12 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain_core.documents import Document
 from src.ingestion.tabular import load_tabular_documents
+from src.retrieval.filename_scope import (
+    doc_filename_from_meta,
+    extract_named_filenames,
+    filter_items_by_filenames,
+    list_data_dir_filenames,
+)
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -213,22 +219,91 @@ def _source_from_doc(doc) -> dict:
     }
 
 
+def _doc_filename(doc: Document) -> str:
+    return doc_filename_from_meta(doc.metadata)
+
+
+def known_corpus_filenames() -> set[str]:
+    """Filenames present in the vector/BM25 corpus or data/raw."""
+    names: set[str] = set()
+    if not _bm25_corpus:
+        try:
+            _refresh_bm25_corpus()
+        except Exception:
+            pass
+    for d in _bm25_corpus:
+        names.add(_doc_filename(d))
+    if not names:
+        try:
+            raw = vector_store.get(include=["metadatas"])
+            for meta in raw.get("metadatas") or []:
+                if not isinstance(meta, dict):
+                    continue
+                raw_s = meta.get("source") or meta.get("filename")
+                if raw_s:
+                    names.add(Path(str(raw_s)).name)
+        except Exception:
+            pass
+    names |= list_data_dir_filenames("data/raw", "data")
+    return names
+
+
+def named_files_in_question(question: str) -> list[str]:
+    """Detect files named in the question against the live corpus."""
+    return extract_named_filenames(question, known=known_corpus_filenames())
+
+
+def _filter_docs_by_filenames(
+    docs: list[Document], filenames: list[str]
+) -> list[Document]:
+    return filter_items_by_filenames(
+        docs, filenames, filename_of=_doc_filename
+    )
+
+
+def _docs_for_filenames(filenames: list[str], limit: int = 80) -> list[Document]:
+    """Fallback: all chunks belonging to the named files."""
+    want = {f.lower() for f in filenames}
+    if not _bm25_corpus:
+        _refresh_bm25_corpus()
+    out: list[Document] = []
+    for d in _bm25_corpus:
+        if _doc_filename(d).lower() in want:
+            out.append(d)
+            if len(out) >= limit:
+                break
+    return out
+
+
 def retrieve_with_sources(question: str, k: int = 5):
-    """Hybrid dense+BM25 (RRF) → rerank → dedupe by page. Returns (docs, sources)."""
+    """Hybrid dense+BM25 (RRF) → rerank → dedupe by page. Returns (docs, sources).
+
+    If the question names one or more corpus files (e.g. « d'après CV - X.pdf »),
+    retrieval is scoped to those files only so unrelated PDFs never appear as sources.
+    """
+    named = extract_named_filenames(question, known=known_corpus_filenames())
     fetch_k = max(20, k * 4)
-    dense = vector_store.similarity_search(question, k=fetch_k)
-    sparse = _bm25_search(question, top_k=fetch_k)
+    # Over-fetch when scoping so post-filter still has enough candidates
+    search_k = fetch_k * 3 if named else fetch_k
+
+    dense = vector_store.similarity_search(question, k=search_k)
+    sparse = _bm25_search(question, top_k=search_k)
+    if named:
+        dense = _filter_docs_by_filenames(dense, named)
+        sparse = _filter_docs_by_filenames(sparse, named)
+        if not dense and not sparse:
+            dense = _docs_for_filenames(named)
+
     fused = _rrf_fuse([dense, sparse], top_n=15) if sparse else dense[:15]
     if not fused:
-        fused = dense
+        fused = dense or (_docs_for_filenames(named) if named else [])
     reranked = _rerank(question, fused, top_n=max(k, 5))
 
     deduped_docs = []
     seen_pages = set()
     for doc in reranked:
         meta = dict(doc.metadata or {})
-        raw_source = meta.get("source") or meta.get("filename") or "document"
-        filename = Path(str(raw_source)).name
+        filename = _doc_filename(doc)
         key = _page_key(meta, filename)
         if key in seen_pages:
             continue
@@ -241,12 +316,26 @@ def retrieve_with_sources(question: str, k: int = 5):
     return deduped_docs, sources
 
 
-def select_cited_sources(answer: str, sources: list[dict], max_n: int = 2) -> list[dict]:
+def select_cited_sources(
+    answer: str,
+    sources: list[dict],
+    max_n: int = 2,
+    allowed_filenames: list[str] | None = None,
+) -> list[dict]:
     """Keep supporting passages, then collapse to one card per filename."""
     import re
 
     if not answer or not sources:
         return []
+
+    if allowed_filenames:
+        allow = {f.lower() for f in allowed_filenames}
+        sources = [
+            s for s in sources if (s.get("filename") or "").lower() in allow
+        ]
+        if not sources:
+            return []
+        max_n = min(max_n, max(1, len(allowed_filenames)))
 
     answer_norm = answer.lower()
     nums = set(re.findall(r"\d[\d\s]*\d|\d+", answer.replace("\u00a0", " ")))
